@@ -129,5 +129,7 @@ export const apiSubmitLabResults = (id, labResults) =>
     body: JSON.stringify({ lab_results: labResults }),
   }).then(handle)
 
-export const apiListHistory = () =>
-  fetch(`${BASE}/api/workflow/list/history`, { headers: authHeaders() }).then(handle)
+export const apiListHistory = (page = 1, pageSize = 20, patient = '') => {
+  const params = new URLSearchParams({ page, page_size: pageSize, patient })
+  return fetch(`${BASE}/api/workflow/list/history?${params}`, { headers: authHeaders() }).then(handle)
+}

@@ -201,7 +201,11 @@ class KnowledgeManager:
     def delete_file(self, file_name: str) -> bool:
         """删除知识文件（支持子目录相对路径），联动清理向量库文件与检索器缓存。"""
         rel_path = Path(file_name).as_posix()
-        file_path = settings.knowledge_dir / rel_path
+        file_path = (settings.knowledge_dir / rel_path).resolve()
+        # 防路径穿越：解析后的目标必须仍在知识目录内（与 save_file 的 Path.name 防护同级）
+        if not file_path.is_relative_to(settings.knowledge_dir.resolve()):
+            logger.warning(f"拒绝删除知识目录外的路径: {file_name}")
+            return False
         if not file_path.exists():
             return False
 
@@ -224,7 +228,7 @@ class KnowledgeManager:
                 if target.exists():
                     target.unlink()
 
-        logger.info(f"知识文件已删除: {safe_name}")
+        logger.info(f"知识文件已删除: {rel_path}")
         return True
 
     # ---------- 检索 ----------

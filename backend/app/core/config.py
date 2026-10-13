@@ -16,7 +16,6 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 BACKEND_DIR = Path(__file__).resolve().parent.parent.parent
 PROJECT_ROOT = BACKEND_DIR.parent
-
 load_dotenv(BACKEND_DIR / ".env", override=False)
 
 DASHSCOPE_COMPATIBLE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
@@ -72,6 +71,10 @@ class Settings(BaseSettings):
     rabbitmq_password: str = "guest"
 
     # ---- 派生路径 ----
+    @property
+    def project_root(self) -> Path:
+        return PROJECT_ROOT
+
     @property
     def knowledge_dir(self) -> Path:
         return BACKEND_DIR / "knowledge_docs"
@@ -137,6 +140,23 @@ class Settings(BaseSettings):
             BACKEND_DIR / "database",
         ):
             directory.mkdir(parents=True, exist_ok=True)
+
+    # 已知的不安全默认密钥（config 默认值与 .env.example 示例值），生产环境禁止使用
+    _INSECURE_JWT_SECRETS = frozenset({"dev-secret-change-me", "change-me-in-production-9f8e7d6c5b4a"})
+
+    def validate_security(self) -> None:
+        """JWT 密钥安全检查：prod 用已知默认值直接拒绝启动（fail-fast），dev 仅告警。"""
+        if self.jwt_secret in self._INSECURE_JWT_SECRETS:
+            message = (
+                "JWT_SECRET 仍为默认示例值，令牌可被伪造。"
+                "请生成随机密钥（如 python -c \"import secrets; print(secrets.token_hex(32))\"）"
+                "并写入 backend/.env 的 JWT_SECRET。"
+            )
+            if self.app_env == "prod":
+                raise RuntimeError(f"[安全拦截] {message}")
+            import warnings
+
+            warnings.warn(f"[安全告警] {message}（dev 环境允许启动）", stacklevel=2)
 
 
 @lru_cache

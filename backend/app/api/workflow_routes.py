@@ -15,6 +15,14 @@ from app.schemas.auth import LabResultRequest, StartWorkflowRequest
 router = APIRouter(prefix="/api/workflow", tags=["workflow"])
 
 
+def _ensure_owned_record(inquiry_id: int, user: SysUser, db: Session):
+    """越权防护（IDOR）：问诊记录仅限主治医生本人访问，返回 404 避免暴露记录是否存在。"""
+    record = InquiryRecordDAO.get(db, inquiry_id)
+    if not record or record.doctor_id != user.id:
+        raise HTTPException(status_code=404, detail="问诊记录不存在")
+    return record
+
+
 @router.post("/start")
 async def start_workflow(
     request: StartWorkflowRequest,
@@ -42,7 +50,12 @@ async def start_workflow(
 
 
 @router.get("/{inquiry_id}/status")
-async def get_status(inquiry_id: int, user: SysUser = Depends(get_current_user)):
+async def get_status(
+    inquiry_id: int,
+    user: SysUser = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    _ensure_owned_record(inquiry_id, user, db)
     status = await asyncio.to_thread(medical_workflow.get_status, inquiry_id)
     if not status.get("success"):
         raise HTTPException(status_code=404, detail=status.get("error", "查询失败"))
@@ -55,8 +68,10 @@ async def submit_lab_results(
     request: LabResultRequest,
     background: BackgroundTasks,
     user: SysUser = Depends(get_current_user),
+    db: Session = Depends(get_db),
 ):
     """化验结果回填：恢复暂停的工作流（HTTP 直连；MQ 模式下由消费者触发同一入口）。"""
+    _ensure_owned_record(inquiry_id, user, db)
 
     def _resume():
         medical_workflow.handle_lab_results(inquiry_id, request.lab_results)
@@ -74,12 +89,18 @@ async def submit_lab_results(
 async def list_history(
     user: SysUser = Depends(get_current_user),
     db: Session = Depends(get_db),
+    page: int = 1,
+    page_size: int = 20,
+    patient: str = "",
 ):
-    records = InquiryRecordDAO.list_by_doctor(db, user.id, limit=50)
+    """问诊历史（分页 + 患者名搜索）。
+
+    page_size 无参数时返回全量（兼容旧前端调用）。
+    """
     from app.medical.workflow import STATUS_LABELS
 
-    return [
-        {
+    def _row(r):
+        return {
             "id": r.id,
             "patient_name": r.patient_name,
             "main_status": r.main_status,
@@ -88,5 +109,16 @@ async def list_history(
             "created_at": r.created_at.strftime("%Y-%m-%d %H:%M") if r.created_at else "",
             "symptom_brief": r.symptom_description[:50],
         }
-        for r in records
-    ]
+
+    if page_size <= 0:
+        records = InquiryRecordDAO.list_by_doctor(db, user.id, limit=50)
+        return {"items": [_row(r) for r in records], "total": len(records), "page": 1, "page_size": len(records)}
+
+    page_size = min(page_size, 100)  # 上限防拉全表
+    records, total = InquiryRecordDAO.page_by_doctor(db, user.id, page, page_size, patient)
+    return {
+        "items": [_row(r) for r in records],
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+    }

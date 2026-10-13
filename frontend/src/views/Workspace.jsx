@@ -24,6 +24,8 @@ function stepIndex(status) {
 
 export default function Workspace() {
   const [history, setHistory] = useState([])
+  const [historyTotal, setHistoryTotal] = useState(0)
+  const [historyPage, setHistoryPage] = useState(1)
   const [historyLoading, setHistoryLoading] = useState(true)
   const [historyError, setHistoryError] = useState('')
   const [currentId, setCurrentId] = useState(null)
@@ -52,16 +54,21 @@ export default function Workspace() {
     }
   }
 
-  const refreshHistory = () => {
+  const loadHistory = (page = 1) => {
     setHistoryLoading(true)
-    apiListHistory()
-      .then((rows) => { setHistory(rows); setHistoryError('') })
+    apiListHistory(page, 20)
+      .then((data) => {
+        setHistory(data.items || [])
+        setHistoryTotal(data.total || 0)
+        setHistoryPage(page)
+        setHistoryError('')
+      })
       .catch((e) => setHistoryError(e.message))
       .finally(() => setHistoryLoading(false))
   }
 
   useEffect(() => {
-    refreshHistory()
+    loadHistory(1)
     return stopPolling
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
@@ -73,7 +80,7 @@ export default function Workspace() {
       setStatus(s)
       if ([5, 99].includes(s.main_status)) {
         stopPolling()
-        refreshHistory()
+        loadHistory(historyPage)
       }
     }).catch(() => {})
     load()
@@ -95,7 +102,7 @@ export default function Workspace() {
         use_rag: useRag,
       })
       watchStatus(resp.inquiry_record_id)
-      refreshHistory()
+      loadHistory(historyPage)
     } catch (err) {
       setError(err.message)
     } finally {
@@ -173,33 +180,44 @@ export default function Workspace() {
       <div className="card workspace-history">
         <h3>
           📋 我的问诊记录
-          {history.length > 0 && <span className="badge">{history.length} 条</span>}
+          {historyTotal > 0 && <span className="badge">共 {historyTotal} 条</span>}
         </h3>
         {historyError ? (
           <div className="state-text error">
             历史记录加载失败：{historyError}
-            <button type="button" className="btn small secondary retry-link" onClick={refreshHistory}>重试</button>
+            <button type="button" className="btn small secondary retry-link" onClick={() => loadHistory(historyPage)}>重试</button>
           </div>
         ) : historyLoading ? (
           <div className="state-text">历史记录加载中…</div>
         ) : (
-          <div className="table-wrap history-scroll">
-            <table className="data">
-              <thead><tr><th>患者</th><th>状态</th><th>RAG</th><th>时间</th></tr></thead>
-              <tbody>
-                {history.map((r) => (
-                  <tr key={r.id} style={{ cursor: 'pointer' }} className={r.id === currentId ? 'active-row' : ''}
-                      onClick={() => watchStatus(r.id)}>
-                    <td>{r.patient_name}</td>
-                    <td><span className={`status-pill s${r.main_status}`}>{r.status_label}</span></td>
-                    <td>{r.use_rag ? '✓' : '—'}</td>
-                    <td className="muted">{r.created_at}</td>
-                  </tr>
-                ))}
-                {!history.length && <tr><td colSpan="4" className="muted">暂无记录</td></tr>}
-              </tbody>
-            </table>
-          </div>
+          <>
+            <div className="table-wrap history-scroll">
+              <table className="data">
+                <thead><tr><th>患者</th><th>状态</th><th>RAG</th><th>时间</th></tr></thead>
+                <tbody>
+                  {history.map((r) => (
+                    <tr key={r.id} style={{ cursor: 'pointer' }} className={r.id === currentId ? 'active-row' : ''}
+                        onClick={() => watchStatus(r.id)}>
+                      <td>{r.patient_name}</td>
+                      <td><span className={`status-pill s${r.main_status}`}>{r.status_label}</span></td>
+                      <td>{r.use_rag ? '✓' : '—'}</td>
+                      <td className="muted">{r.created_at}</td>
+                    </tr>
+                  ))}
+                  {!history.length && <tr><td colSpan="4" className="muted">暂无记录</td></tr>}
+                </tbody>
+              </table>
+            </div>
+            {historyTotal > 20 && (
+              <div className="pager">
+                <button type="button" className="btn small secondary" disabled={historyPage <= 1}
+                        onClick={() => loadHistory(historyPage - 1)}>上一页</button>
+                <span className="muted">{historyPage} / {Math.ceil(historyTotal / 20)} 页</span>
+                <button type="button" className="btn small secondary" disabled={historyPage >= Math.ceil(historyTotal / 20)}
+                        onClick={() => loadHistory(historyPage + 1)}>下一页</button>
+              </div>
+            )}
+          </>
         )}
       </div>
 

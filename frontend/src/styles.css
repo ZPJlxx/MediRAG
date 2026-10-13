@@ -215,6 +215,9 @@ table.data tr.active-row td:first-child { border-left: 3px solid var(--primary);
 .state-text.error { color: var(--danger); text-align: left; padding: 8px 0; }
 .retry-link { margin-left: 8px; }
 
+/* 历史分页 */
+.pager { display: flex; align-items: center; justify-content: space-between; margin-top: 10px; }
+
 /* 证据引用折叠：默认只显示来源行，展开看原文 */
 .citation-item summary { list-style: none; cursor: pointer; }
 .citation-item summary::-webkit-details-marker { display: none; }

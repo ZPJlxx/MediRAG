@@ -55,6 +55,14 @@ class BaseMedicalAgent(ABC):
         """患者历史（默认无，子类按需覆写）。"""
         return []
 
+    def post_validate(self, validated, request) -> None:
+        """校验通过后的结果增强钩子（在序列化/落库之前调用，原地修改 validated）。
+
+        适合做程序化的安全核对（如过敏禁忌提醒）：此处对 validated 的修改
+        会随 to_json() 一并落库，get_status 读取时可见。
+        默认不做任何事，子类按需覆写。
+        """
+
     # ---------- 公共执行骨架 ----------
     def execute(self, request, inquiry_record_id: int, patient_key: PatientKey | None = None) -> dict:
         session = SessionLocal()
@@ -107,6 +115,10 @@ class BaseMedicalAgent(ABC):
             llm_result.pop("citations", None)
             validated = self.validate(llm_result)
             validated.citations = map_llm_citations(raw_citations, evidence)
+
+            # 4.5 落库前增强钩子：程序化核对（如过敏禁忌）必须在此修改已校验模型，
+            #     改动才会随 to_json() 持久化并在 get_status 中可见
+            self.post_validate(validated, request)
 
             result_json = validated.to_json()
             citations_json = json.dumps(

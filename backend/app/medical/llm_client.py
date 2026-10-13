@@ -12,12 +12,18 @@
 
 import json
 import re
+import time
 
 from loguru import logger
 from openai import OpenAI
 
 from app.core.config import settings
 from app.rag.evidence import format_reference_block
+
+# LLM 调用韧性参数：单次超时 / 重试次数 / 重试退避基数
+LLM_TIMEOUT_SECONDS = 120
+LLM_MAX_RETRIES = 3
+LLM_RETRY_BACKOFF_BASE = 2.0
 
 
 class LLMClient:
@@ -32,19 +38,46 @@ class LLMClient:
             )
         self.model = llm_config["model"]
         self.provider = llm_config["provider"]
-        self.client = OpenAI(api_key=llm_config["api_key"], base_url=llm_config["base_url"])
+        self.client = OpenAI(
+            api_key=llm_config["api_key"],
+            base_url=llm_config["base_url"],
+            timeout=LLM_TIMEOUT_SECONDS,
+            max_retries=0,  # 重试策略由 _chat 统一管理（带退避与日志），关闭 SDK 内部静默重试
+        )
         logger.info(f"医疗 LLM 网关就绪: provider={self.provider}, model={self.model}")
 
     def _chat(self, system_prompt: str, user_prompt: str, temperature: float = 0.3) -> str:
-        response = self.client.chat.completions.create(
-            model=self.model,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ],
-            temperature=temperature,
-            max_tokens=4000,
-        )
+        """带超时与指数退避重试的对话调用。
+
+        医疗工作流单次问诊串多次 LLM 调用，网关抖动若直接抛错会打断六分钟的
+        诊疗流程；可重试的瞬时错误（限流/超时/5xx）在此消化，重试耗尽才上抛。
+        """
+        last_exc: Exception | None = None
+        for attempt in range(1, LLM_MAX_RETRIES + 1):
+            try:
+                response = self.client.chat.completions.create(
+                    model=self.model,
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_prompt},
+                    ],
+                    temperature=temperature,
+                    max_tokens=4000,
+                )
+                break
+            except Exception as exc:  # openai 的异常类型跨版本不稳定，宽捕获后按需重试
+                last_exc = exc
+                if attempt == LLM_MAX_RETRIES:
+                    logger.error(f"LLM 调用失败（第 {attempt} 次重试后放弃）: {exc}")
+                    raise
+                backoff = LLM_RETRY_BACKOFF_BASE ** attempt
+                logger.warning(
+                    f"LLM 调用异常（第 {attempt}/{LLM_MAX_RETRIES} 次），{backoff:.0f}s 后重试: {exc}"
+                )
+                time.sleep(backoff)
+        else:  # for-break 不会走到这，防御性兜底
+            raise last_exc or RuntimeError("LLM 调用失败")
+
         msg = response.choices[0].message
         content = msg.content or ""
         if not content.strip():

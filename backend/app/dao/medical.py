@@ -62,6 +62,29 @@ class InquiryRecordDAO:
             .all()
         )
 
+    @staticmethod
+    def page_by_doctor(
+        session: Session,
+        doctor_id: int,
+        page: int = 1,
+        page_size: int = 20,
+        patient_keyword: str = "",
+    ) -> tuple[list[InquiryRecord], int]:
+        """分页 + 患者名模糊搜索。返回 (records, total)。"""
+        query = session.query(InquiryRecord).filter(InquiryRecord.doctor_id == doctor_id)
+        if patient_keyword.strip():
+            query = query.filter(
+                InquiryRecord.patient_name.like(f"%{patient_keyword.strip()}%")
+            )
+        total = query.count()
+        records = (
+            query.order_by(InquiryRecord.created_at.desc())
+            .offset((max(page, 1) - 1) * page_size)
+            .limit(page_size)
+            .all()
+        )
+        return records, total
+
 
 class ResultDAO:
     """三张结果表的通用 CRUD（结构一致，合并实现）。"""

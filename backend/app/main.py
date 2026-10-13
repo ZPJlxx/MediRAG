@@ -25,6 +25,7 @@ from app.core.logging import setup_logging
 async def lifespan(app: FastAPI):
     setup_logging()
     settings.ensure_runtime_directories()
+    settings.validate_security()
     create_tables()
     logger.info(
         f"MediRAG 启动完成 env={settings.app_env}, "
@@ -96,6 +97,21 @@ app.include_router(auth_router)
 app.include_router(user_router)
 app.include_router(knowledge_router)
 app.include_router(workflow_router)
+
+
+# ---------- 前端静态资源托管（单服务部署模式）----------
+# 存在 ../frontend/dist 时由后端直接伺服（API 与静态资源同源，免去独立 Nginx）；
+# 开发模式（Vite 5173）或未构建时不挂载，不影响原有流程。
+_FRONTEND_DIST = settings.project_root / "frontend" / "dist"
+if _FRONTEND_DIST.is_dir():
+    from fastapi.staticfiles import StaticFiles
+    from starlette.responses import FileResponse
+
+    @app.get("/", include_in_schema=False)
+    async def serve_spa():
+        return FileResponse(_FRONTEND_DIST / "index.html")
+
+    app.mount("/assets", StaticFiles(directory=_FRONTEND_DIST / "assets"), name="assets")
 
 
 @app.get("/")

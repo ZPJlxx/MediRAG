@@ -1,0 +1,299 @@
+"""医疗 LLM 客户端（升级自 MediAgent-LLM 的 tools/llm_client.py）。
+
+保留：
+- OpenAI 兼容协议接入（统一走 config.resolve_llm() 网关，可切换任意厂商）
+- 三层输出防御：Prompt 约束 JSON -> 容错提取 -> Pydantic 校验
+- 推理模型 reasoning_content 兼容
+
+升级（本项目核心创新）：
+- 三个分析方法的 Prompt 均注入「编号参考资料块」（RAG 检索结果）
+- 要求 LLM 输出 citations 数组声明引用了哪些编号，供上层映射回真实证据
+"""
+
+import json
+import re
+
+from loguru import logger
+from openai import OpenAI
+
+from app.core.config import settings
+from app.rag.evidence import format_reference_block
+
+
+class LLMClient:
+    """医疗 Agent 统一 LLM 调用入口。"""
+
+    def __init__(self):
+        llm_config = settings.resolve_llm()
+        if not llm_config["api_key"]:
+            raise ValueError(
+                "LLM 未配置：请在 .env 中设置 LLM_API_KEY/LLM_BASE_URL，"
+                "或配置 DASHSCOPE_API_KEY / DEEPSEEK_API_KEY"
+            )
+        self.model = llm_config["model"]
+        self.provider = llm_config["provider"]
+        self.client = OpenAI(api_key=llm_config["api_key"], base_url=llm_config["base_url"])
+        logger.info(f"医疗 LLM 网关就绪: provider={self.provider}, model={self.model}")
+
+    def _chat(self, system_prompt: str, user_prompt: str, temperature: float = 0.3) -> str:
+        response = self.client.chat.completions.create(
+            model=self.model,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            temperature=temperature,
+            max_tokens=4000,
+        )
+        msg = response.choices[0].message
+        content = msg.content or ""
+        if not content.strip():
+            reasoning = getattr(msg, "reasoning_content", None) or ""
+            if reasoning:
+                logger.warning(
+                    f"模型返回空 content，reasoning_content 长度 {len(reasoning)}，可能 max_tokens 不足"
+                )
+            raise ValueError("模型返回空内容，请检查 max_tokens 或模型配置")
+        return content
+
+    # ---------- 三个业务方法 ----------
+    def analyze_symptoms(
+        self,
+        symptom_description: str,
+        patient_history: list[dict],
+        reference_block: str = "",
+    ) -> dict:
+        prompt = self._build_symptom_prompt(symptom_description, patient_history, reference_block)
+        result = self._chat("你是一个专业的医疗AI助手，专门进行症状分析。回答必须基于参考资料并标注引用。", prompt)
+        return self._parse_json_result(result, "症状分析")
+
+    def analyze_diagnosis(
+        self,
+        symptom_analysis: str,
+        lab_results: list[dict],
+        patient_history: list[dict],
+        reference_block: str = "",
+        verification_block: str = "",
+    ) -> dict:
+        prompt = self._build_diagnosis_prompt(
+            symptom_analysis, lab_results, patient_history, reference_block, verification_block
+        )
+        result = self._chat("你是一个专业的医疗AI助手，专门进行疾病诊断分析。回答必须基于参考资料并标注引用。", prompt)
+        return self._parse_json_result(result, "诊断分析")
+
+    def verify_hypothesis(
+        self,
+        disease: str,
+        probability,
+        symptom_description: str,
+        key_symptoms: list[str],
+        lab_results: list[dict],
+        reference_block: str = "",
+    ) -> dict:
+        """单个鉴别假设的核验（Send fan-out 并行分支调用）。"""
+        prompt = self._build_hypothesis_prompt(
+            disease, probability, symptom_description, key_symptoms, lab_results, reference_block
+        )
+        result = self._chat("你是鉴别诊断核验专家，负责独立核验单个疾病假设，回答必须基于参考资料并标注引用。", prompt)
+        return self._parse_json_result(result, "假设核验")
+
+    def suggest_treatment(
+        self,
+        diagnosis_result: str,
+        allergy_history: list[str],
+        reference_block: str = "",
+    ) -> dict:
+        prompt = self._build_treatment_prompt(diagnosis_result, allergy_history, reference_block)
+        result = self._chat("你是一个专业的医疗AI助手，专门提供治疗建议。回答必须基于参考资料并标注引用。", prompt)
+        return self._parse_json_result(result, "治疗建议")
+
+    # ---------- Prompt 构建 ----------
+    @staticmethod
+    def _history_text(patient_history: list[dict]) -> str:
+        if not patient_history:
+            return ""
+        lines = ["\n患者历史症状和诊断："]
+        for record in patient_history:
+            lines.append(f"- 症状：{record.get('symptoms', '')}")
+            lines.append(f"- 诊断：{record.get('diagnosis', '')}")
+            lines.append(f"- 时间：{record.get('date', '')}")
+        return "\n".join(lines) + "\n"
+
+    @staticmethod
+    def _lab_text(lab_results: list[dict]) -> str:
+        if not lab_results:
+            return ""
+        lines = ["\n化验结果："]
+        for result in lab_results:
+            lines.append(
+                f"- {result.get('test_name', '')}: {result.get('result_value', '')} "
+                f"{result.get('unit', '')} (参考范围: {result.get('reference_range', '')}"
+                f"{'，异常' if result.get('is_abnormal') else ''})"
+            )
+        return "\n".join(lines) + "\n"
+
+    def _build_symptom_prompt(self, symptom_description, patient_history, reference_block) -> str:
+        return f"""请根据以下信息进行症状分析：
+
+当前症状描述：{symptom_description}
+{self._history_text(patient_history)}
+{reference_block}
+
+请严格按照以下JSON格式返回分析结果（不要输出JSON以外的任何内容）：
+{{
+    "key_symptoms": ["症状1", "症状2", "症状3"],
+    "possible_causes": ["可能原因1", "可能原因2"],
+    "possible_diseases": [
+        {{"disease": "疾病名称", "probability": 85}},
+        {{"disease": "疾病名称", "probability": 70}},
+        {{"disease": "疾病名称", "probability": 60}},
+        {{"disease": "疾病名称", "probability": 45}},
+        {{"disease": "疾病名称", "probability": 30}}
+    ],
+    "further_information_needed": ["需要确认的信息1"],
+    "lab_tests_needed": ["血常规", "尿常规"],
+    "citations": [{{"ref": 1, "quote": "参考资料中支持该结论的原文短语"}}]
+}}
+
+要求：
+1. 尽量列出5种可能疾病，按可能性从高到低排序，probability 为0-100的整数
+2. 症状明确时 lab_tests_needed 可以为空数组；症状不明确时列出需要的检查项目
+3. 【引用要求】如参考资料中有支持你判断的内容，必须在 citations 中以 {{"ref": 编号}} 声明，
+   quote 摘录参考资料中的原文短语（不超过50字）；参考资料未覆盖的部分基于医学常识给出，此时 citations 可为空数组
+4. 严禁编造参考资料中不存在的编号或内容
+"""
+
+    def _build_diagnosis_prompt(
+        self, symptom_analysis, lab_results, patient_history, reference_block, verification_block=""
+    ) -> str:
+        return f"""请根据以下信息进行诊断分析：
+
+症状分析结果：{symptom_analysis}
+{self._lab_text(lab_results)}
+{verification_block}
+{self._history_text(patient_history)}
+{reference_block}
+
+请严格按照以下JSON格式返回诊断结果（不要输出JSON以外的任何内容）：
+{{
+    "main_diagnosis": "最可能的诊断结果",
+    "differential_diagnoses": ["鉴别诊断1", "鉴别诊断2", "鉴别诊断3"],
+    "diagnosis_basis": ["诊断依据1", "诊断依据2"],
+    "certainty": 85.5,
+    "citations": [{{"ref": 2, "quote": "参考资料中支持该结论的原文短语"}}]
+}}
+
+要求：
+1. 尽量列出至少3种鉴别诊断
+2. certainty 为0-100之间的数值，表示诊断确定性
+3. 诊断依据要具体明确，并优先引用参考资料中的标准/指南内容（如诊断阈值、分级标准）
+4. 如给出了「鉴别假设并行核验结果」，请综合各假设的支持度与缺口做判断：
+   支持度高且有证据的假设优先，缺口信息可作为进一步检查建议
+5. 【引用要求】诊断依据如来自参考资料，必须在 citations 中声明对应编号并摘录原文短语（不超过50字）；
+   参考资料未覆盖时基于医学常识给出，citations 可为空数组
+6. 严禁编造参考资料中不存在的编号或内容
+"""
+
+    def _build_hypothesis_prompt(
+        self, disease, probability, symptom_description, key_symptoms, lab_results, reference_block
+    ) -> str:
+        symptoms_text = "、".join(key_symptoms[:6]) if key_symptoms else "无"
+        lab_text = self._lab_text(lab_results).strip() or "（暂无化验结果）"
+
+        return f"""请独立核验以下鉴别诊断假设：
+
+待核验假设：{disease}（症状分析阶段给出的可能性：{probability if probability is not None else "未知"}%）
+患者症状描述：{symptom_description}
+关键症状：{symptoms_text}
+{lab_text}
+
+{reference_block}
+
+请严格按照以下JSON格式返回核验结果（不要输出JSON以外的任何内容）：
+{{
+    "disease": "{disease}",
+    "support_score": 65,
+    "matched_criteria": ["符合的标准/依据1", "符合的标准/依据2"],
+    "missing_information": ["尚缺的支撑信息1"],
+    "rationale": "一句话核验结论",
+    "citations": [{{"ref": 1, "quote": "参考资料中支持该判断的原文短语"}}]
+}}
+
+要求：
+1. support_score 为0-100的整数：患者症状+化验结果+参考资料对该假设的综合支持度
+2. matched_criteria 优先对照参考资料中的诊断标准/阈值（如血压分级、血糖界值），并在 citations 声明编号与原文短语（不超过50字）
+3. missing_information 列出确认该假设还缺少的关键信息（可作为进一步检查建议）
+4. 只核验这一个假设，不要展开分析其他疾病
+5. 严禁编造参考资料中不存在的编号或内容；参考资料未覆盖时基于医学常识评估，citations 可为空数组
+"""
+
+    def _build_treatment_prompt(self, diagnosis_result, allergy_history, reference_block) -> str:
+        allergy_text = f"\n患者过敏史：{', '.join(allergy_history)}" if allergy_history else ""
+        return f"""请根据以下信息提供治疗建议：
+
+诊断结果：{diagnosis_result}{allergy_text}
+
+{reference_block}
+
+请严格按照以下JSON格式返回治疗建议（不要输出JSON以外的任何内容）：
+{{
+    "treatment_plan": {{
+        "medication": ["药物1", "药物2"],
+        "non_medication": ["非药物治疗1"]
+    }},
+    "medication_advice": [
+        {{
+            "drug_name": "药物名称",
+            "dosage": "用法用量",
+            "duration": "用药时长",
+            "precautions": "注意事项"
+        }}
+    ],
+    "lifestyle_advice": ["生活方式建议1"],
+    "follow_up_advice": ["随访建议1"],
+    "warning_signals": ["警示信号1"],
+    "citations": [{{"ref": 1, "quote": "参考资料中支持该建议的原文短语"}}]
+}}
+
+要求：
+1. 严格考虑患者的过敏史，禁止推荐过敏药物；如资料中提示禁忌请务必遵守
+2. 用药建议（剂量/疗程）优先采用参考资料中的标准方案并在 citations 中声明编号与原文短语（不超过50字）
+3. 给出实用的生活方式、随访建议和需要警惕的警示信号
+4. 严禁编造参考资料中不存在的编号或内容
+"""
+
+    # ---------- 输出解析 ----------
+    @staticmethod
+    def _parse_json_result(result: str, context: str) -> dict:
+        """通用 JSON 解析：直接解析 -> 剥离代码围栏 -> 大括号截取，三级容错。"""
+        candidates = [result]
+
+        fenced = re.search(r"```(?:json)?\s*([\s\S]*?)```", result)
+        if fenced:
+            candidates.insert(0, fenced.group(1))
+
+        start = result.find("{")
+        end = result.rfind("}") + 1
+        if start >= 0 and end > start:
+            candidates.append(result[start:end])
+
+        for candidate in candidates:
+            try:
+                parsed = json.loads(candidate)
+                if isinstance(parsed, dict):
+                    return parsed
+            except json.JSONDecodeError:
+                continue
+
+        logger.error(f"无法解析{context}结果: {result[:500]}")
+        raise ValueError(f"{context}结果格式错误")
+
+
+# 全局 LLM 客户端单例（配置缺失时延迟报错，不阻断其他模块导入）
+try:
+    llm_client = LLMClient()
+except ValueError as exc:
+    from loguru import logger as _logger
+
+    _logger.warning(f"LLM 客户端暂不可用: {exc}")
+    llm_client = None

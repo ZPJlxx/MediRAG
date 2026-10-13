@@ -1,0 +1,52 @@
+fastapi>=0.111,<1.0
+uvicorn[standard]>=0.30
+python-multipart>=0.0.9
+
+# 数据层（SQLAlchemy 2.0 统一 ORM；pymysql 供 prod 模式 MySQL 使用）
+sqlalchemy>=2.0,<2.1
+pymysql>=1.1
+cryptography>=42.0
+
+# 校验与配置
+pydantic>=2.7,<3.0
+pydantic-settings>=2.2
+python-dotenv>=1.0
+
+# 安全：bcrypt 密码哈希 + PyJWT 令牌
+bcrypt>=4.1
+PyJWT>=2.8
+
+# LLM（OpenAI 兼容 SDK）
+openai>=1.30
+
+# LangChain 1.x 生态（与 general-doc-qa-assistant 验证过的版本组合一致）
+langchain-core==1.2.4
+langchain-classic==1.0.0
+langchain-community==0.4.1
+langchain-openai==1.0.2
+langchain-text-splitters==1.0.0
+
+# LangGraph 工作流 + 检查点持久化（修复原项目 MemorySaver 重启即失效）
+langgraph==1.0.2
+langgraph-checkpoint-sqlite>=2.0.1
+
+# 向量库与检索
+# 说明：chromadb 的原生 wheel（chroma-hnswlib/rust frontend）在部分 Windows + Py3.12
+# 环境下 add_items 段错误，本项目改用自实现 SqliteVectorStore（SQLite + numpy 余弦），
+# 见 app/rag/vector_store.py，零原生依赖、同等持久化。
+numpy>=1.26
+rank-bm25==0.2.2
+jieba>=0.42
+
+# DashScope（embedding / rerank）
+dashscope>=1.20
+
+# 文档解析
+pypdf>=4.2
+python-docx>=1.1
+
+# 日志
+loguru>=0.7
+
+# 消息队列（可选，prod 模式化验结果异步回传）
+pika>=1.3

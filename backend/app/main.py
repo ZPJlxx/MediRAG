@@ -118,4 +118,5 @@ async def health():
 if __name__ == "__main__":
     import uvicorn
 
-    uvicorn.run("app.main:app", host="127.0.0.1", port=8000, reload=False)
+    # dev 环境自动热重启：改完 Python 代码保存即生效，无需手动重启服务
+    uvicorn.run("app.main:app", host="127.0.0.1", port=8000, reload=settings.app_env == "dev")

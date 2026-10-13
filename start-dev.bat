@@ -20,8 +20,8 @@ if not exist "%ROOT%backend\.env" (
     exit /b 1
 )
 
-echo [1/2] Starting backend FastAPI (new window, port 8000)...
-start "MediRAG-Backend" cmd /k "cd /d %ROOT%backend && .venv\Scripts\python.exe -m uvicorn app.main:app --host 127.0.0.1 --port 8000"
+echo [1/2] Starting backend FastAPI (new window, port 8000, auto-reload on)...
+start "MediRAG-Backend" cmd /k "cd /d %ROOT%backend && .venv\Scripts\python.exe -m uvicorn app.main:app --host 127.0.0.1 --port 8000 --reload"
 
 REM wait for backend before frontend (frontend proxies /api to 8000)
 timeout /t 5 /nobreak >nul

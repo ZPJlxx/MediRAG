@@ -83,6 +83,9 @@ class MedicalWorkflow:
         self.graph = self._build_workflow_graph()
         self._executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="mediworkflow")
         self._run_lock = threading.Lock()  # SQLite 检查点写并发保护
+        # LLM 并发闸门：限制同时执行的工作流数，超出部分在此排队（保护 DashScope 配额，
+        # 避免并发问诊打爆网关限流）。多进程部署时每 worker 各持一份，配额按 worker 分摊。
+        self._llm_slots = threading.Semaphore(settings.max_concurrent_workflows)
 
     # ---------- 图构建 ----------
     def _build_workflow_graph(self):
@@ -507,14 +510,24 @@ class MedicalWorkflow:
         config = {"configurable": {"thread_id": thread_id}}
 
         inquiry_record_id = None
-        with self._run_lock:
-            try:
-                result = self.graph.invoke(initial_state, config)
-                inquiry_record_id = result.get("inquiry_record_id")
-            except GraphInterrupt:
-                snapshot = self.graph.get_state(config)
-                if snapshot and snapshot.values:
-                    inquiry_record_id = snapshot.values.get("inquiry_record_id")
+        # 并发闸门：拿不到槽位则阻塞排队（HTTP 层已在 to_thread，不占事件循环）；
+        # 排队超上限直接失败，防止请求无限堆积
+        if not self._llm_slots.acquire(timeout=settings.workflow_queue_timeout_seconds):
+            raise RuntimeError(
+                f"诊疗工作流排队超时（>{settings.workflow_queue_timeout_seconds}s），"
+                "当前并发已满，请稍后重试"
+            )
+        try:
+            with self._run_lock:
+                try:
+                    result = self.graph.invoke(initial_state, config)
+                    inquiry_record_id = result.get("inquiry_record_id")
+                except GraphInterrupt:
+                    snapshot = self.graph.get_state(config)
+                    if snapshot and snapshot.values:
+                        inquiry_record_id = snapshot.values.get("inquiry_record_id")
+        finally:
+            self._llm_slots.release()
 
         if not inquiry_record_id:
             raise RuntimeError("工作流启动失败：未取得问诊记录 ID")
@@ -540,10 +553,34 @@ class MedicalWorkflow:
                 f"问诊记录 {inquiry_record_id} 无工作流线程（可能未暂停等待化验或已恢复过）"
             )
         config = {"configurable": {"thread_id": thread_id}}
-        with self._run_lock:
-            result = self.graph.invoke(Command(resume=lab_results), config=config)
-        logger.info(f"化验结果已回填，工作流已恢复，问诊记录 {inquiry_record_id}")
-        return result
+        # 化验恢复同样过并发闸门（诊断+治疗两个 LLM 阶段）
+        if not self._llm_slots.acquire(timeout=settings.workflow_queue_timeout_seconds):
+            raise ValueError(
+                f"工作流恢复排队超时（>{settings.workflow_queue_timeout_seconds}s），请稍后重试"
+            )
+        try:
+            with self._run_lock:
+                result = self.graph.invoke(Command(resume=lab_results), config=config)
+            logger.info(f"化验结果已回填，工作流已恢复，问诊记录 {inquiry_record_id}")
+            return result
+        finally:
+            self._llm_slots.release()
+
+    def get_status_token(self, inquiry_record_id: int) -> str | None:
+        """轻量变更令牌：主状态码 + 最新事件 ID（一条索引聚合查询）。
+
+        SSE 心跳用它探测变化（替代每跳全量组装快照），令牌变了才调 get_status。
+        每个节点完成都会写 workflow_event，故该令牌能覆盖全部有意义的状态推进。
+        """
+        session = SessionLocal()
+        try:
+            record = InquiryRecordDAO.get(session, inquiry_record_id)
+            if not record:
+                return None
+            last_event = WorkflowEventDAO.last_event_id(session, inquiry_record_id)
+            return f"{record.main_status}:{last_event}"
+        finally:
+            session.close()
 
     def get_status(self, inquiry_record_id: int) -> dict:
         """真实状态合成：数据库状态机 + 各阶段结果 + 检查点是否暂停。"""

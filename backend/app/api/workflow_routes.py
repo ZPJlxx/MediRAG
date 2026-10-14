@@ -8,6 +8,7 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user, get_current_user_sse
+from app.api.rate_limit import workflow_rate_limit
 from app.core.database import get_db
 from app.dao.medical import InquiryRecordDAO
 from app.medical.workflow import medical_workflow
@@ -16,8 +17,8 @@ from app.schemas.auth import LabResultRequest, StartWorkflowRequest
 
 router = APIRouter(prefix="/api/workflow", tags=["workflow"])
 
-# SSE 轮询间隔：轻于前端 3s 轮询（服务端可做指纹去重，客户端只在变化时收到事件）
-_SSE_POLL_SECONDS = 1.5
+# SSE 探针间隔：轻量令牌查询（单条聚合），变化即组装推送
+_SSE_POLL_SECONDS = 1.0
 # 连接最长存活：到期客户端 EventSource 自动重连，防止僵尸连接占住会话
 _SSE_MAX_LIFETIME_SECONDS = 600
 
@@ -30,7 +31,7 @@ def _ensure_owned_record(inquiry_id: int, user: SysUser, db: Session):
     return record
 
 
-@router.post("/start")
+@router.post("/start", dependencies=[Depends(workflow_rate_limit)])
 async def start_workflow(
     request: StartWorkflowRequest,
     user: SysUser = Depends(get_current_user),
@@ -164,23 +165,33 @@ async def stream_status_events(
     async def event_stream():
         import time
 
-        last_fingerprint = None
+        last_token: str | None = None
+        last_fingerprint: str | None = None
         deadline = time.monotonic() + _SSE_MAX_LIFETIME_SECONDS
         try:
             while time.monotonic() < deadline:
-                status = await asyncio.to_thread(medical_workflow.get_status, inquiry_id)
-                if not status.get("success"):
-                    yield f"event: error\ndata: {json.dumps({'error': status.get('error', '查询失败')})}\n\n"
+                # 专用轻量探针：一条聚合查询取变更令牌，令牌变了才全量组装快照，
+                # 把每连接每跳的 DB 成本从 4 表联查降为单查询
+                token = await asyncio.to_thread(medical_workflow.get_status_token, inquiry_id)
+                if token is None:
+                    yield f"event: error\ndata: {json.dumps({'error': '问诊记录不存在'})}\n\n"
                     return
 
-                fingerprint = _status_fingerprint(status)
-                if fingerprint != last_fingerprint:
-                    last_fingerprint = fingerprint
-                    yield f"event: status\ndata: {json.dumps(status, ensure_ascii=False)}\n\n"
+                if token != last_token:
+                    last_token = token
+                    status = await asyncio.to_thread(medical_workflow.get_status, inquiry_id)
+                    if not status.get("success"):
+                        yield f"event: error\ndata: {json.dumps({'error': status.get('error', '查询失败')})}\n\n"
+                        return
 
-                # 终态：推完最后一份快照即收流（客户端拿到终态后自己 close）
-                if status.get("main_status") in (5, 99):
-                    return
+                    fingerprint = _status_fingerprint(status)
+                    if fingerprint != last_fingerprint:
+                        last_fingerprint = fingerprint
+                        yield f"event: status\ndata: {json.dumps(status, ensure_ascii=False)}\n\n"
+
+                    # 终态：推完最后一份快照即收流（客户端拿到终态后自己 close）
+                    if status.get("main_status") in (5, 99):
+                        return
 
                 await asyncio.sleep(_SSE_POLL_SECONDS)
             # 生命周期到期的保活收尾：通知客户端重连

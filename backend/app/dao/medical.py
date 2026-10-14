@@ -190,6 +190,17 @@ class WorkflowEventDAO:
             .all()
         )
 
+    @staticmethod
+    def last_event_id(session: Session, inquiry_record_id: int) -> int:
+        """最新事件 ID（自增），作为状态变更令牌的一部分；无事件返回 0。"""
+        row = (
+            session.query(WorkflowEvent.id)
+            .filter(WorkflowEvent.inquiry_record_id == inquiry_record_id)
+            .order_by(WorkflowEvent.id.desc())
+            .first()
+        )
+        return row[0] if row else 0
+
 
 def safe_json_loads(text: str, default=None):
     try:

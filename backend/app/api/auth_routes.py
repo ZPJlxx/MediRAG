@@ -3,6 +3,7 @@
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
+from app.api.rate_limit import login_rate_limit
 from app.core.database import get_db
 from app.core.security import create_access_token, verify_password
 from app.models.entities import SysUser
@@ -11,7 +12,7 @@ from app.schemas.auth import LoginRequest, LoginResponse
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 
 
-@router.post("/login", response_model=LoginResponse)
+@router.post("/login", response_model=LoginResponse, dependencies=[Depends(login_rate_limit)])
 def login(form: LoginRequest, db: Session = Depends(get_db)):
     user = db.query(SysUser).filter(SysUser.username == form.username).first()
     if not user or not verify_password(form.password, user.password_hash):

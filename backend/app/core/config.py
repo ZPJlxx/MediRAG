@@ -59,6 +59,12 @@ class Settings(BaseSettings):
     medical_rag_enabled: bool = True
     rag_top_k: int = 5
 
+    # ---- 工作流并发控制（保护 LLM 网关配额）----
+    # 单 worker 同时执行的工作流上限，超出排队；多进程部署时总并发 = 该值 × worker 数
+    max_concurrent_workflows: int = 3
+    # 排队等待槽位的超时秒数，超时直接报错（防请求无限堆积）
+    workflow_queue_timeout_seconds: int = 120
+
     # ---- 文档切分 ----
     chunk_size: int = 500
     chunk_overlap: int = 200

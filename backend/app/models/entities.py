@@ -39,6 +39,19 @@ class SysUser(Base, TimestampMixin):
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
 
 
+class AlgorithmApiKey(Base, TimestampMixin):
+    """算法接口调用方密钥（面向外部系统的服务间鉴权，与用户 JWT 分离）。"""
+
+    __tablename__ = "algorithm_api_key"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    name: Mapped[str] = mapped_column(String(50), nullable=False, comment="调用方名称")
+    key_hash: Mapped[str] = mapped_column(String(200), nullable=False, unique=True, index=True, comment="sha256(api_key)")
+    rate_limit_qps: Mapped[int] = mapped_column(Integer, nullable=False, default=5, comment="每秒请求上限")
+    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    last_used_at: Mapped[dt.datetime | None] = mapped_column(DateTime, nullable=True)
+
+
 class KnowledgeFile(Base, TimestampMixin):
     """医学知识库文件台账（向量库为 Chroma，按 collection=md5(文件名) 隔离）。"""
 

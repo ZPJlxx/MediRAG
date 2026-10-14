@@ -12,6 +12,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from loguru import logger
 
+from app.api.algorithm_routes import router as algorithm_router
 from app.api.auth_routes import router as auth_router
 from app.api.knowledge_routes import router as knowledge_router
 from app.api.user_routes import router as user_router
@@ -97,6 +98,7 @@ app.include_router(auth_router)
 app.include_router(user_router)
 app.include_router(knowledge_router)
 app.include_router(workflow_router)
+app.include_router(algorithm_router)
 
 
 # ---------- 前端静态资源托管（单服务部署模式）----------

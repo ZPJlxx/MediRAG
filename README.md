@@ -132,6 +132,51 @@ python -m app.eval.ab_compare       # A/B：RAG 开 vs 关（证据引用数 / �
 | Enterprise-RAG：DB 配置硬编码 5 处 | 统一 `app/core/config.py`（pydantic-settings） |
 | Enterprise-RAG：3后端+3前端进程割裂 | 单 FastAPI + 单 React |
 
+## 算法服务接口（v1）
+
+面向外部系统的服务间调用，与用户端 JWT 鉴权分离：凭 `X-Api-Key` 访问，按调用方独立限流。
+密钥由管理员签发（明文只出现一次）：
+
+```bash
+# 签发（需 admin JWT）
+curl -X POST http://127.0.0.1:8000/api/v1/algorithm/keys \
+  -H "Authorization: Bearer <admin_jwt>" -H "Content-Type: application/json" \
+  -d '{"name": "his-system", "rate_limit_qps": 5}'
+# → {"api_key": "mdrg_xxx...", ...}   ← 妥善保存，不再显示
+```
+
+### A. 医学文献混合检索（无状态，毫秒~亚秒级）
+
+```bash
+curl -X POST http://127.0.0.1:8000/api/v1/algorithm/retrieval \
+  -H "X-Api-Key: mdrg_xxx" -H "Content-Type: application/json" \
+  -d '{"query": "高血压 2 级的诊断标准", "top_k": 5}'
+```
+
+返回带 `rank/source/location/snippet` 的证据列表与 `latency_ms`；三路召回 + RRF + 双级重排，全链路降级可用。
+
+### C. 临床辅助诊疗（异步任务，多 Agent 工作流）
+
+```bash
+# 1. 提交任务 → task_id
+curl -X POST http://127.0.0.1:8000/api/v1/algorithm/diagnosis/tasks \
+  -H "X-Api-Key: mdrg_xxx" -H "Content-Type: application/json" \
+  -d '{"patient_name":"李四","patient_age":52,"patient_gender":"男",
+       "allergy_history":["青霉素"],"symptom_description":"近一月头晕头痛，血压156/96mmHg"}'
+
+# 2. 轮询状态：queued | running | succeeded | failed
+curl http://127.0.0.1:8000/api/v1/algorithm/diagnosis/tasks/<task_id> -H "X-Api-Key: mdrg_xxx"
+
+# 3. waiting_lab=true 时回填化验，任务自动恢复
+curl -X POST http://127.0.0.1:8000/api/v1/algorithm/diagnosis/tasks/<task_id>/lab-results \
+  -H "X-Api-Key: mdrg_xxx" -H "Content-Type: application/json" \
+  -d '{"lab_results":[{"test_name":"血肌酐","result_value":"98","unit":"μmol/L","reference_range":"57-97","is_abnormal":false}]}'
+```
+
+终态（succeeded/failed）响应携带完整 `result`（鉴别核验榜单/主诊断/治疗建议/逐条证据引用）。
+**所有响应均包含 `disclaimer` 合规声明：仅供辅助参考，不能替代执业医师决策。**
+交互式文档见 `/docs`（OpenAPI 3）。
+
 ## 已知限制与说明
 
 - **向量库**：chromadb 的原生 wheel（chroma-hnswlib / rust frontend）在部分 Windows + Python 3.12 环境下 `add_items` 段错误（faulthandler 定位于原生层），本项目改用自实现 `SqliteVectorStore`（SQLite 存储 + numpy 暴力余弦检索）。医学知识库规模（万级 chunk 内）延迟毫秒级，零原生依赖。若在 Linux/其他环境可自行换回 Chroma（接口面已隔离在 `create_indexes`）。

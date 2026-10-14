@@ -30,8 +30,9 @@ export default function Workspace() {
   const [historyError, setHistoryError] = useState('')
   const [currentId, setCurrentId] = useState(null)
   const [status, setStatus] = useState(null)
-  // 轮询定时器用 ref 管理：state 会在闭包里捕获旧值，导致终态/切换记录后轮询不清
+  // 轮询定时器/事件流连接用 ref 管理：state 会在闭包里捕获旧值，导致终态/切换记录后清理不掉
   const pollTimerRef = useRef(null)
+  const eventSourceRef = useRef(null)
 
   // 表单
   const [patientName, setPatientName] = useState('')
@@ -51,6 +52,10 @@ export default function Workspace() {
     if (pollTimerRef.current) {
       clearInterval(pollTimerRef.current)
       pollTimerRef.current = null
+    }
+    if (eventSourceRef.current) {
+      eventSourceRef.current.close()
+      eventSourceRef.current = null
     }
   }
 
@@ -73,18 +78,54 @@ export default function Workspace() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
+  const applyStatus = (s) => {
+    setStatus(s)
+    if ([5, 99].includes(s.main_status)) {
+      stopPolling()
+      loadHistory(historyPage)
+    }
+  }
+
+  const startFallbackPolling = (id) => {
+    // SSE 不可用/断开时的降级路径：3s 轮询（与原实现一致）
+    if (pollTimerRef.current) return
+    const load = () => apiWorkflowStatus(id).then(applyStatus).catch(() => {})
+    load()
+    pollTimerRef.current = setInterval(load, 3000)
+  }
+
   const watchStatus = (id) => {
     stopPolling()
     setCurrentId(id)
-    const load = () => apiWorkflowStatus(id).then((s) => {
-      setStatus(s)
-      if ([5, 99].includes(s.main_status)) {
-        stopPolling()
-        loadHistory(historyPage)
-      }
-    }).catch(() => {})
-    load()
-    pollTimerRef.current = setInterval(load, 3000)
+
+    const token = localStorage.getItem('medirag_token')
+    if (typeof EventSource === 'undefined' || !token) {
+      startFallbackPolling(id)
+      return
+    }
+
+    // SSE 订阅：状态指纹变化时服务端推送完整快照，替代盲轮询
+    const url = `${import.meta.env.VITE_API_BASE_URL || ''}/api/workflow/${id}/events?token=${encodeURIComponent(token)}`
+    const es = new EventSource(url)
+    eventSourceRef.current = es
+
+    es.addEventListener('status', (e) => {
+      try {
+        applyStatus(JSON.parse(e.data))
+      } catch { /* 单帧解析失败忽略，等下一帧 */ }
+    })
+    es.addEventListener('error', () => {
+      // 连接中断（网络抖动/服务重启/服务端终态收流）：终态外降级回轮询兜底
+      es.close()
+      if (eventSourceRef.current === es) eventSourceRef.current = null
+      apiWorkflowStatus(id).then((s) => {
+        if ([5, 99].includes(s.main_status)) {
+          applyStatus(s)
+        } else {
+          startFallbackPolling(id)
+        }
+      }).catch(() => startFallbackPolling(id))
+    })
   }
 
   const start = async (e) => {

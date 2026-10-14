@@ -14,6 +14,25 @@ def get_current_user(request: Request, db: Session = Depends(get_db)) -> SysUser
     if not auth_header.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="未登录或令牌缺失")
     token = auth_header.removeprefix("Bearer ").strip()
+    return _resolve_user(token, db)
+
+
+def get_current_user_sse(request: Request, db: Session = Depends(get_db)) -> SysUser:
+    """SSE 专用鉴权：EventSource 无法自定义请求头，允许 ?token= 查询参数携带 JWT。
+
+    JWT 校验逻辑与 get_current_user 完全一致，仅多一个取值途径。
+    """
+    token = request.query_params.get("token", "")
+    if not token:
+        auth_header = request.headers.get("Authorization", "")
+        if auth_header.startswith("Bearer "):
+            token = auth_header.removeprefix("Bearer ").strip()
+    if not token:
+        raise HTTPException(status_code=401, detail="未登录或令牌缺失")
+    return _resolve_user(token, db)
+
+
+def _resolve_user(token: str, db: Session) -> SysUser:
     payload = decode_access_token(token)
     if not payload:
         raise HTTPException(status_code=401, detail="令牌无效或已过期")

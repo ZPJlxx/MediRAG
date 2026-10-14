@@ -1,11 +1,13 @@
-"""诊疗工作流路由：启动/状态/化验回填/历史列表。"""
+"""诊疗工作流路由：启动/状态/化验回填/历史列表/SSE 状态推送。"""
 
 import asyncio
+import json
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
+from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
-from app.api.deps import get_current_user
+from app.api.deps import get_current_user, get_current_user_sse
 from app.core.database import get_db
 from app.dao.medical import InquiryRecordDAO
 from app.medical.workflow import medical_workflow
@@ -13,6 +15,11 @@ from app.models.entities import SysUser
 from app.schemas.auth import LabResultRequest, StartWorkflowRequest
 
 router = APIRouter(prefix="/api/workflow", tags=["workflow"])
+
+# SSE 轮询间隔：轻于前端 3s 轮询（服务端可做指纹去重，客户端只在变化时收到事件）
+_SSE_POLL_SECONDS = 1.5
+# 连接最长存活：到期客户端 EventSource 自动重连，防止僵尸连接占住会话
+_SSE_MAX_LIFETIME_SECONDS = 600
 
 
 def _ensure_owned_record(inquiry_id: int, user: SysUser, db: Session):
@@ -122,3 +129,71 @@ async def list_history(
         "page": page,
         "page_size": page_size,
     }
+
+
+def _status_fingerprint(status: dict) -> str:
+    """状态内容指纹：变化才推送，避免每 1.5s 全量刷一遍。"""
+    return json.dumps(
+        {
+            "ms": status.get("main_status"),
+            "wl": status.get("waiting_lab"),
+            "lt": status.get("lab_tests_needed"),
+            "sym": bool(status.get("symptom_analysis")),
+            "hyp": len(status.get("hypothesis_verifications") or []),
+            "dia": bool(status.get("diagnosis")),
+            "tre": bool(status.get("treatment")),
+            "ev": len(status.get("events") or []),
+        },
+        sort_keys=True,
+    )
+
+
+@router.get("/{inquiry_id}/events")
+async def stream_status_events(
+    inquiry_id: int,
+    user: SysUser = Depends(get_current_user_sse),
+    db: Session = Depends(get_db),
+):
+    """SSE 状态推送：状态指纹变化时向前端推送完整状态快照。
+
+    终态（完成/失败）推送后主动断流，客户端 EventSource 会自动重连，
+    重连后因指纹不再变化只会收到一次快照，不会形成事件风暴。
+    """
+    _ensure_owned_record(inquiry_id, user, db)
+
+    async def event_stream():
+        import time
+
+        last_fingerprint = None
+        deadline = time.monotonic() + _SSE_MAX_LIFETIME_SECONDS
+        try:
+            while time.monotonic() < deadline:
+                status = await asyncio.to_thread(medical_workflow.get_status, inquiry_id)
+                if not status.get("success"):
+                    yield f"event: error\ndata: {json.dumps({'error': status.get('error', '查询失败')})}\n\n"
+                    return
+
+                fingerprint = _status_fingerprint(status)
+                if fingerprint != last_fingerprint:
+                    last_fingerprint = fingerprint
+                    yield f"event: status\ndata: {json.dumps(status, ensure_ascii=False)}\n\n"
+
+                # 终态：推完最后一份快照即收流（客户端拿到终态后自己 close）
+                if status.get("main_status") in (5, 99):
+                    return
+
+                await asyncio.sleep(_SSE_POLL_SECONDS)
+            # 生命周期到期的保活收尾：通知客户端重连
+            yield "event: reconnect\ndata: {}\n\n"
+        except asyncio.CancelledError:
+            # 客户端断开（EventSource.close / 页面切换）会走到这里，静默退出
+            raise
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",  # Nginx 反代时禁用缓冲，保证事件即时下发
+        },
+    )

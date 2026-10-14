@@ -25,6 +25,16 @@ from app.core.logging import setup_logging
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     setup_logging()
+
+    # ---- 启动自检：逐项检查配置/连通性，fail 级问题阻断启动 ----
+    checks = settings.run_startup_checks()
+    failed = [c for c in checks if c[1] == "fail"]
+    for item, level, desc in checks:
+        icon = {"ok": "OK ", "warn": "WARN", "fail": "FAIL"}[level]
+        logger.info(f"自检 [{icon}] {item:14s} {desc}")
+    if failed:
+        raise RuntimeError(f"启动自检未通过（{len(failed)} 项 fail），服务拒绝启动。见上方日志。")
+
     settings.ensure_runtime_directories()
     settings.validate_security()
     create_tables()
@@ -93,6 +103,16 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# 可观测性：request-id 生成/透传 + 访问日志（放 CORS 内层，所有业务请求都覆盖）
+from app.core.middleware import RequestIdMiddleware  # noqa: E402
+
+app.add_middleware(RequestIdMiddleware)
+
+# 统一错误码与响应体：{code, message, request_id}
+from app.core.errors import register_error_handlers  # noqa: E402
+
+register_error_handlers(app)
 
 app.include_router(auth_router)
 app.include_router(user_router)

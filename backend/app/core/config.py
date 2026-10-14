@@ -164,6 +164,58 @@ class Settings(BaseSettings):
 
             warnings.warn(f"[安全告警] {message}（dev 环境允许启动）", stacklevel=2)
 
+    def run_startup_checks(self) -> list[tuple[str, str, str]]:
+        """启动自检：返回 [(项, 状态(ok/warn/fail), 说明)] 清单。
+
+        fail 级问题由调用方（main.lifespan）决定是否阻断启动；
+        warn 仅提示。集中在此避免校验逻辑散落各模块。
+        """
+        checks: list[tuple[str, str, str]] = []
+
+        # 1. LLM 网关配置
+        llm = self.resolve_llm()
+        if llm["provider"] == "none":
+            checks.append(("llm", "fail", "未配置任何 LLM 网关（LLM_API_KEY / DASHSCOPE_API_KEY / DEEPSEEK_API_KEY 均为空），诊疗工作流不可用"))
+        else:
+            checks.append(("llm", "ok", f"provider={llm['provider']}, model={llm['model']}"))
+
+        # 2. 检索侧 embedding
+        if self.retrieval_embedding_provider == "disabled":
+            checks.append(("embedding", "warn", "检索 embedding 已禁用，RAG 证据链不可用（LLM 将无参考作答）"))
+        elif not self.retrieval_embedding_api_key_resolved():
+            key_desc = "RETRIEVAL_EMBEDDING_API_KEY / DASHSCOPE_API_KEY"
+            checks.append(("embedding", "warn", f"检索 embedding 缺少 API Key（{key_desc}），首次检索将失败"))
+        else:
+            checks.append(("embedding", "ok", f"{self.retrieval_embedding_provider}::{self.retrieval_embedding_model}"))
+
+        # 3. 数据库连通性
+        try:
+            from sqlalchemy import create_engine, text
+
+            probe = create_engine(self.database_url, pool_pre_ping=True)
+            with probe.connect() as conn:
+                conn.execute(text("SELECT 1"))
+            probe.dispose()
+            db_kind = "mysql" if not self.is_sqlite else "sqlite"
+            checks.append(("database", "ok", f"{db_kind} 连通"))
+        except Exception as exc:
+            checks.append(("database", "fail", f"连接失败: {exc}（MySQL 模式请先 docker compose start mysql）"))
+
+        # 4. 运行目录可写
+        try:
+            self.ensure_runtime_directories()
+            checks.append(("runtime_dirs", "ok", "knowledge/vector_store/database 目录就绪"))
+        except Exception as exc:
+            checks.append(("runtime_dirs", "fail", f"运行目录创建失败: {exc}"))
+
+        # 5. JWT 密钥
+        if self.jwt_secret in self._INSECURE_JWT_SECRETS:
+            checks.append(("jwt_secret", "warn" if self.app_env != "prod" else "fail", "使用默认示例密钥"))
+        else:
+            checks.append(("jwt_secret", "ok", "已配置独立密钥"))
+
+        return checks
+
 
 @lru_cache
 def get_settings() -> Settings:

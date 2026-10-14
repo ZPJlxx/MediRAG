@@ -7,6 +7,10 @@ function authHeaders() {
 
 function extractDetail(data, status) {
   if (!data) return `请求失败 (${status})`
+  // 统一错误体 {code, message, request_id}：优先展示 message，报障时附上 request_id
+  if (typeof data.message === 'string' && data.message) {
+    return data.request_id ? `${data.message}（追踪号 ${data.request_id}）` : data.message
+  }
   const detail = data.detail
   if (typeof detail === 'string') return detail
   // FastAPI/Pydantic 校验错误是数组：[{loc, msg, type}, ...]
@@ -19,7 +23,7 @@ function extractDetail(data, status) {
       .join('; ')
   }
   if (detail && typeof detail === 'object') return detail.message || detail.msg || JSON.stringify(detail)
-  return data.message || `请求失败 (${status})`
+  return `请求失败 (${status})`
 }
 
 async function handle(response, { authRedirect = true } = {}) {

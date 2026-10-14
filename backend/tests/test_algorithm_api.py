@@ -44,6 +44,12 @@ def client(tmp_path, monkeypatch):
     from app.api.algorithm_deps import _limiter
     _limiter._hits.clear()
 
+    # 启动自检按 settings.database_url 探测，测试环境指向临时 SQLite
+    from app.core.config import settings as app_settings
+    _probe_url = f"sqlite:///{(tmp_path / 'probe.db').as_posix()}"
+    monkeypatch.setattr(type(app_settings), "database_url", property(lambda self: _probe_url), raising=False)
+    monkeypatch.setattr(type(app_settings), "is_sqlite", property(lambda self: True), raising=False)
+
     from app.main import app
     with TestClient(app) as c:
         yield c
@@ -77,7 +83,7 @@ def test_retrieval_rejects_invalid_key(client):
         headers={"X-Api-Key": "mdrg_invalid000000000000000000000000000"},
     )
     assert resp.status_code == 401
-    assert "无效" in resp.json()["detail"]
+    assert "无效" in resp.json()["message"]
 
 
 def test_api_key_management_requires_admin(client):

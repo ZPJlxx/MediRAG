@@ -92,6 +92,11 @@ def test_login_rate_limit(tmp_path):
     TestSession = sessionmaker(bind=engine)
     orig_engine, orig_local = dm.engine, dm.SessionLocal
     dm.engine, dm.SessionLocal = engine, TestSession
+    # 启动自检按 settings.database_url 探测，测试环境指向临时 SQLite
+    from app.core.config import settings as app_settings
+    dm_probe = f"sqlite:///{(tmp_path / 'probe.db').as_posix()}"
+    app_settings.__class__.database_url = property(lambda self: dm_probe)
+    app_settings.__class__.is_sqlite = property(lambda self: True)
     Base.metadata.create_all(bind=engine)
 
     from app.core.security import hash_password
@@ -114,6 +119,10 @@ def test_login_rate_limit(tmp_path):
     finally:
         dm.engine, dm.SessionLocal = orig_engine, orig_local
         rate_limit._limiter.reset()
+        # 还原自检探测配置（直接改了类属性，需手动恢复读取 .env 的行为）
+        from app.core.config import Settings
+        del Settings.database_url
+        del Settings.is_sqlite
 
     assert codes[0] == 401, "首次应是密码错误 401"
     assert codes[10] == 429 and codes[11] == 429, f"第 11/12 次未限流: {codes}"

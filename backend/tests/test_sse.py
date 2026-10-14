@@ -25,6 +25,11 @@ def client(tmp_path, monkeypatch):
     # 必须同样 patch 它模块内的名字，否则 get_status 会连到真实库
     import app.medical.workflow as workflow_mod
     monkeypatch.setattr(workflow_mod, "SessionLocal", TestSessionLocal)
+    # 启动自检按 settings.database_url 探测，测试环境指向临时 SQLite
+    from app.core.config import settings as app_settings
+    _probe_url = f"sqlite:///{(tmp_path / 'probe.db').as_posix()}"
+    monkeypatch.setattr(type(app_settings), "database_url", property(lambda self: _probe_url), raising=False)
+    monkeypatch.setattr(type(app_settings), "is_sqlite", property(lambda self: True), raising=False)
     Base.metadata.create_all(bind=test_engine)
 
     from app.core.security import hash_password

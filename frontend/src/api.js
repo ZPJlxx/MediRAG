@@ -152,3 +152,11 @@ export const apiPatientChat = (sessionId, message) =>
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ session_id: sessionId || '', message }),
   }).then(handle)
+
+export const apiPatientChatHistory = (sessionId, limit = 50) =>
+  fetch(`${BASE}/api/patient/chat/history?session_id=${encodeURIComponent(sessionId)}&limit=${limit}`)
+    .then(handle)
+
+export const apiPatientSessions = (sessionIds) =>
+  fetch(`${BASE}/api/patient/chat/sessions?ids=${encodeURIComponent(sessionIds.join(','))}`)
+    .then(handle)

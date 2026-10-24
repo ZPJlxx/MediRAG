@@ -31,6 +31,8 @@ def client(tmp_path, monkeypatch):
     monkeypatch.setattr(workflow_mod, "SessionLocal", TestSessionLocal)
     import app.medical.patient_chat as chat_mod
     monkeypatch.setattr(chat_mod, "SessionLocal", TestSessionLocal)
+    import app.api.patient_routes as patient_routes_mod
+    monkeypatch.setattr(patient_routes_mod, "SessionLocal", TestSessionLocal)
     from app.core.config import settings as app_settings
     _probe_url = f"sqlite:///{(tmp_path / 'probe.db').as_posix()}"
     monkeypatch.setattr(type(app_settings), "database_url", property(lambda self: _probe_url), raising=False)
@@ -176,6 +178,83 @@ class TestPatientChatAPI:
         ]
         assert codes[:20] == [200] * 20
         assert codes[20] == 429
+
+    def test_history_roundtrip(self, client, monkeypatch):
+        """聊天落库后 history 接口能按会话拉回，且隔离：另一会话拿不到。"""
+        from app.api.rate_limit import _limiter
+        _limiter.reset()  # 前序用例（限流测试）可能已烧光本 IP 配额
+
+        monkeypatch.setattr(
+            "app.medical.patient_chat.llm_client.classify_intent",
+            lambda message, history_text="": {"intent": "inquiry", "confidence": 0.9, "reasoning": "t"},
+        )
+        monkeypatch.setattr(
+            "app.medical.patient_chat.knowledge_manager.search_citations",
+            lambda query, top_k=None: [],
+        )
+        monkeypatch.setattr(
+            "app.medical.patient_chat.llm_client.patient_chat_reply",
+            lambda messages, intent, reference_block="": {"reply": "建议尽快就诊神经内科", "citations": []},
+        )
+        # 会话 A 两轮
+        r1 = client.post("/api/patient/chat", json={"message": "我最近老头晕"})
+        assert r1.status_code == 200, r1.text
+        sid_a = r1.json()["session_id"]
+        r2 = client.post("/api/patient/chat", json={"session_id": sid_a, "message": "还有点恶心"})
+        assert r2.status_code == 200, r2.text
+        # 会话 B 一条（隔离对照）
+        client.post("/api/patient/chat", json={"message": "你好"})
+
+        resp = client.get(f"/api/patient/chat/history?session_id={sid_a}")
+        assert resp.status_code == 200
+        data = resp.json()
+        roles = [m["role"] for m in data["messages"]]
+        # 2 轮 = 4 条（user/assistant 成对），且不含会话 B 的消息
+        assert roles == ["user", "assistant", "user", "assistant"]
+        assert all("头晕" in m["content"] or "恶心" in m["content"] or "神经内科" in m["content"]
+                   for m in data["messages"])
+        assert data["messages"][0]["intent"] == "inquiry"
+
+    def test_history_requires_session_id(self, client):
+        resp = client.get("/api/patient/chat/history")
+        assert resp.status_code == 400
+
+    def test_history_unknown_session_returns_empty(self, client):
+        resp = client.get("/api/patient/chat/history?session_id=pchat_nonexistent")
+        assert resp.status_code == 200
+        assert resp.json()["messages"] == []
+
+    def test_sessions_summary(self, client, monkeypatch):
+        """sessions 接口：台账内会话返回摘要（首条提问预览/条数），空会话过滤，未传 ids 返回空。"""
+        from app.api.rate_limit import _limiter
+        _limiter.reset()
+
+        monkeypatch.setattr(
+            "app.medical.patient_chat.llm_client.classify_intent",
+            lambda message, history_text="": {"intent": "consult", "confidence": 0.9, "reasoning": "t"},
+        )
+        monkeypatch.setattr(
+            "app.medical.patient_chat.knowledge_manager.search_citations",
+            lambda query, top_k=None: [],
+        )
+        monkeypatch.setattr(
+            "app.medical.patient_chat.llm_client.patient_chat_reply",
+            lambda messages, intent, reference_block="": {"reply": "解答", "citations": []},
+        )
+        sid_a = client.post("/api/patient/chat", json={"message": "阿司匹林饭后吃好吗"}).json()["session_id"]
+        sid_b = client.post("/api/patient/chat", json={"message": "血压多少算高"}).json()["session_id"]
+
+        # 空 ids
+        assert client.get("/api/patient/chat/sessions").json()["sessions"] == []
+        # 台账查询：两个有消息 + 一个从未聊过的
+        resp = client.get(f"/api/patient/chat/sessions?ids={sid_a},{sid_b},pchat_never_used")
+        assert resp.status_code == 200
+        sessions = resp.json()["sessions"]
+        assert len(sessions) == 2  # 空会话被过滤
+        by_id = {s["session_id"]: s for s in sessions}
+        assert by_id[sid_a]["first_message"].startswith("阿司匹林")
+        assert by_id[sid_b]["message_count"] == 2  # 1 轮 = user+assistant
+        assert all(s["last_time"] for s in sessions)
 
 
 # ---------- 医生端追问澄清（workflow 节点级）----------

@@ -167,6 +167,14 @@ label.field .control { margin-top: 4px; display: block; }
 .intent-inquiry { background: #fff4e0; color: #b45309; }
 .intent-emergency { background: var(--danger); color: #fff; }
 .chat-disclaimer { margin-top: 10px; padding-top: 8px; border-top: 1px dashed #b8d4d9; font-size: 11px; color: var(--text-light); }
+.sessions-panel { width: min(860px, calc(100% - 32px)); margin: 0 auto 12px; padding: 14px 16px; }
+.sessions-panel h4 { margin-bottom: 10px; font-size: 14px; }
+.sessions-empty { padding: 16px 0; text-align: center; }
+.sessions-item { padding: 10px 12px; border-radius: 8px; cursor: pointer; border: 1px solid transparent; }
+.sessions-item:hover { background: #e8f4f6; }
+.sessions-item.active { background: #e8f4f6; border-color: var(--primary); }
+.sessions-title { font-size: 13px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sessions-meta { font-size: 11px; margin-top: 2px; }
 .chat-input { display: flex; gap: 10px; padding: 14px 16px; border-top: 1px solid var(--border); background: #fafcfd; }
 .chat-input input { flex: 1; }
 .chat-footer { text-align: center; color: rgba(255,255,255,0.9); font-size: 12px; padding: 0 20px 16px; }

@@ -116,6 +116,9 @@ label.field .control { margin-top: 4px; display: block; }
 .login-card h1 { font-size: 22px; color: var(--primary-dark); margin-bottom: 4px; }
 .login-card .sub { color: var(--text-light); font-size: 13px; margin-bottom: 24px; }
 .login-card .demo { margin-top: 16px; font-size: 12px; color: var(--text-light); background: #f4f7f9; padding: 8px 10px; border-radius: 6px; }
+.login-card .patient-entry { display: block; margin-top: 12px; text-align: center; font-size: 13px;
+  color: var(--primary); text-decoration: none; padding: 8px; border: 1px dashed var(--primary); border-radius: 8px; }
+.login-card .patient-entry:hover { background: #e8f4f6; }
 
 /* ---------- 状态徽标 / 步骤 ---------- */
 .status-pill { display: inline-block; padding: 3px 12px; border-radius: 12px; font-size: 12px; font-weight: 600; }
@@ -125,7 +128,48 @@ label.field .control { margin-top: 4px; display: block; }
 .status-pill.s3 { background: #f0eafb; color: #7c3aed; }
 .status-pill.s4 { background: #e6f6f1; color: #0f766e; }
 .status-pill.s5 { background: #e6f4ea; color: var(--success); }
+.status-pill.s6 { background: #fff4e0; color: #b45309; }
 .status-pill.s99 { background: #fbe9e7; color: var(--danger); }
+
+/* ---------- 追问澄清卡片（医生端）---------- */
+.clarify-card .clarify-item { margin-bottom: 12px; }
+.clarify-card .clarify-q { margin-bottom: 6px; font-size: 13px; font-weight: 600; }
+.clarify-card .clarify-item input { width: 100%; }
+
+/* ---------- 患者端聊天页 ---------- */
+.chat-page { min-height: 100vh; display: flex; flex-direction: column; background: linear-gradient(135deg, #0e7a8a 0%, #16a3b6 60%, #7fd4de 100%); }
+.chat-topbar { display: flex; align-items: center; gap: 14px; padding: 14px 24px; color: #fff; }
+.chat-topbar .chat-brand { font-size: 18px; font-weight: 700; display: flex; align-items: center; gap: 10px; }
+.chat-topbar .chat-brand .brand-avatar { width: 36px; height: 36px; border-radius: 50%; background: #fff;
+  padding: 2px; object-fit: cover; }
+.chat-topbar .muted { color: rgba(255,255,255,0.85); font-size: 12px; flex: 1; }
+.chat-topbar .btn.secondary { background: rgba(255,255,255,0.92); color: var(--primary-dark); border: none; }
+.chat-window { flex: 1; display: flex; flex-direction: column; width: min(860px, calc(100% - 32px));
+  margin: 0 auto 16px; min-height: 0; overflow: hidden; }
+.msg-list { flex: 1; overflow-y: auto; padding: 20px; display: flex; flex-direction: column; gap: 14px; min-height: 320px; }
+.msg-row { display: flex; align-items: flex-start; gap: 10px; }
+.msg-row.user { justify-content: flex-end; }
+.msg-row.bot { justify-content: flex-start; }
+.msg-avatar { width: 38px; height: 38px; border-radius: 50%; object-fit: cover; flex-shrink: 0;
+  border: 2px solid #fff; box-shadow: 0 2px 6px rgba(0,0,0,0.12); margin-top: 2px; }
+.msg-avatar.bot-avatar { background: #e8f4f6; }
+.msg-row.user .msg-avatar { order: 2; }
+.msg-bubble { max-width: 78%; padding: 12px 14px; border-radius: 12px; font-size: 14px; line-height: 1.7; }
+.msg-bubble.user { background: var(--primary); color: #fff; border-bottom-right-radius: 4px; white-space: pre-wrap; }
+.msg-bubble.bot { background: #e8f4f6; color: var(--text); border-bottom-left-radius: 4px; }
+.msg-bubble.bot.emergency { background: #fbe9e7; border: 1px solid var(--danger); }
+.msg-bubble.bot.error { background: #fbe9e7; }
+.msg-bubble.typing { color: var(--text-light); font-size: 13px; }
+.msg-bubble .msg-text { white-space: pre-wrap; }
+.intent-badge { display: inline-block; font-size: 11px; font-weight: 700; padding: 2px 8px; border-radius: 10px; margin-bottom: 8px; }
+.intent-chitchat { background: #eef2f4; color: var(--text-light); }
+.intent-consult { background: #e8f0fb; color: #2563eb; }
+.intent-inquiry { background: #fff4e0; color: #b45309; }
+.intent-emergency { background: var(--danger); color: #fff; }
+.chat-disclaimer { margin-top: 10px; padding-top: 8px; border-top: 1px dashed #b8d4d9; font-size: 11px; color: var(--text-light); }
+.chat-input { display: flex; gap: 10px; padding: 14px 16px; border-top: 1px solid var(--border); background: #fafcfd; }
+.chat-input input { flex: 1; }
+.chat-footer { text-align: center; color: rgba(255,255,255,0.9); font-size: 12px; padding: 0 20px 16px; }
 
 .stepper { display: flex; margin: 14px 0 18px; }
 .step { flex: 1; text-align: center; position: relative; font-size: 12px; color: var(--text-light); }

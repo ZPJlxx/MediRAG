@@ -26,3 +26,11 @@ frontend/dist/
 Thumbs.db
 .DS_Store
 /backend/knowledge_docs/
+
+# ===== 头像原图（构建用压缩版在 src/assets）=====
+frontend/robot.png
+frontend/zpj_user.png
+
+# ===== 本地展示图与一次性脚本 =====
+display image/
+backend/scripts/e2e_verify.py

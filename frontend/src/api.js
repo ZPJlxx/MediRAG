@@ -133,7 +133,22 @@ export const apiSubmitLabResults = (id, labResults) =>
     body: JSON.stringify({ lab_results: labResults }),
   }).then(handle)
 
+export const apiSubmitClarification = (id, answers) =>
+  fetch(`${BASE}/api/workflow/${id}/clarify`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
+    body: JSON.stringify({ answers }),
+  }).then(handle)
+
 export const apiListHistory = (page = 1, pageSize = 20, patient = '') => {
   const params = new URLSearchParams({ page, page_size: pageSize, patient })
   return fetch(`${BASE}/api/workflow/list/history?${params}`, { headers: authHeaders() }).then(handle)
 }
+
+// ---- 患者端聊天（免登录，不带 token；接口不会返回 401，不会触发 handle 的自动刷新）----
+export const apiPatientChat = (sessionId, message) =>
+  fetch(`${BASE}/api/patient/chat`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ session_id: sessionId || '', message }),
+  }).then(handle)

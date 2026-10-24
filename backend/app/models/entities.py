@@ -152,3 +152,31 @@ class WorkflowEvent(Base, TimestampMixin):
     stage: Mapped[str] = mapped_column(String(50), nullable=False)
     status: Mapped[str] = mapped_column(String(20), nullable=False, comment="start|done|failed|waiting")
     detail: Mapped[str] = mapped_column(String(500), nullable=False, default="")
+
+
+class PatientChatSession(Base, TimestampMixin):
+    """患者端聊天会话（免登录：以 session_key 关联浏览器 localStorage）。"""
+
+    __tablename__ = "patient_chat_session"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    session_key: Mapped[str] = mapped_column(
+        String(64), nullable=False, unique=True, index=True, comment="客户端生成/后端签发的会话标识"
+    )
+    message_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0, comment="累计消息数")
+    client_ip: Mapped[str] = mapped_column(String(50), nullable=False, default="", comment="最近来源 IP（限流审计）")
+
+
+class PatientChatMessage(Base, TimestampMixin):
+    """患者端聊天消息（含意图标签，全链路落库审计）。"""
+
+    __tablename__ = "patient_chat_message"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    session_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True, comment="会话 ID")
+    role: Mapped[str] = mapped_column(String(10), nullable=False, comment="user|assistant")
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    intent: Mapped[str] = mapped_column(
+        String(20), nullable=False, default="", comment="chitchat|consult|inquiry|emergency（仅 user 消息）"
+    )
+    citations: Mapped[str] = mapped_column(Text, nullable=False, default="[]", comment="证据引用 JSON（仅 assistant 消息）")

@@ -30,6 +30,7 @@ from loguru import logger
 from app.core.config import settings
 from app.core.database import SessionLocal
 from app.dao.medical import InquiryRecordDAO, ResultDAO, WorkflowEventDAO, safe_json_loads
+from app.models.entities import InquiryRecord
 from app.medical.agents.base import PatientKey
 from app.medical.agents.diagnosis_analysis import diagnosis_analysis_agent
 from app.medical.agents.hypothesis_verification import (
@@ -38,10 +39,12 @@ from app.medical.agents.hypothesis_verification import (
 )
 from app.medical.agents.symptom_analysis import symptom_analysis_agent
 from app.medical.agents.treatment_advice import treatment_advice_agent
+from app.medical.llm_client import llm_client
 from app.schemas.medical import InquiryStatus
 
 STATUS_LABELS = {
-    0: "已创建", 1: "症状分析", 2: "等待化验", 3: "诊断分析", 4: "治疗建议", 5: "已完成", 99: "失败",
+    0: "已创建", 1: "症状分析", 2: "等待化验", 3: "诊断分析", 4: "治疗建议", 5: "已完成",
+    6: "等待补充信息", 99: "失败",
 }
 
 
@@ -54,6 +57,9 @@ class MedicalWorkflowState(TypedDict, total=False):
     allergy_history: list[str]
     symptom_description: str
     use_rag: bool
+    # ---- 症状描述模糊时的追问澄清（interrupt/resume 人机协同第二实例）----
+    clarify_questions: list[dict]
+    clarify_rounds: int
     symptom_analysis_result: dict | None
     lab_tests_needed: list[str]
     lab_results: list[dict]
@@ -92,6 +98,8 @@ class MedicalWorkflow:
         workflow = StateGraph(MedicalWorkflowState)
 
         workflow.add_node("create_inquiry", self._create_inquiry_record)
+        workflow.add_node("check_clarification", self._check_clarification)
+        workflow.add_node("wait_for_clarification", self._wait_for_clarification)
         workflow.add_node("symptom_analysis", self._perform_symptom_analysis)
         workflow.add_node("check_lab_needed", self._check_lab_tests_needed)
         workflow.add_node("wait_for_lab", self._wait_for_lab_results)
@@ -107,8 +115,14 @@ class MedicalWorkflow:
 
         workflow.add_conditional_edges(
             "create_inquiry", self._route_after_node,
-            {"continue": "symptom_analysis", "error": "handle_error"},
+            {"continue": "check_clarification", "error": "handle_error"},
         )
+        # 模糊主诉先追问补全（interrupt 第二实例），补答后不再复查直接分析（限 1 轮）
+        workflow.add_conditional_edges(
+            "check_clarification", self._should_wait_for_clarification,
+            {"wait": "wait_for_clarification", "continue": "symptom_analysis", "error": "handle_error"},
+        )
+        workflow.add_edge("wait_for_clarification", "symptom_analysis")
         workflow.add_conditional_edges(
             "symptom_analysis", self._route_after_node,
             {"continue": "check_lab_needed", "error": "handle_error"},
@@ -164,6 +178,101 @@ class MedicalWorkflow:
             logger.error(f"创建问诊记录失败: {exc}")
             state["error_message"] = str(exc)
             state["current_status"] = "failed"
+        finally:
+            session.close()
+        return state
+
+    # ---------- 症状描述模糊时的追问澄清（interrupt/resume 第二实例）----------
+    def _check_clarification(self, state: MedicalWorkflowState) -> MedicalWorkflowState:
+        """充分性检查：描述模糊（如「喉咙不舒服」）则生成追问并暂停工作流。
+
+        一次轻量 LLM 调用（temperature=0.1），失败时降级为直接进入症状分析——
+        澄清是质量增强手段，不能因为它挡住整条问诊链路。
+        """
+        session = SessionLocal()
+        inquiry_id = state.get("inquiry_record_id")
+        try:
+            state["clarify_questions"] = []
+            if state.get("clarify_rounds", 0) > 0:
+                return state  # 已追问过 1 轮，不再复查（防无限追问）
+
+            WorkflowEventDAO.log(session, inquiry_id, "check_clarification", "start")
+            result = llm_client.check_symptom_sufficiency(
+                symptom_description=state.get("symptom_description", ""),
+                patient_age=state.get("patient_age"),
+                patient_gender=state.get("patient_gender", ""),
+            )
+            questions = result.get("clarify_questions", [])
+            if not result.get("sufficient") and questions:
+                state["clarify_questions"] = questions
+                InquiryRecordDAO.update_status(
+                    session, inquiry_id, InquiryStatus.WAITING_CLARIFICATION
+                )
+                WorkflowEventDAO.log(
+                    session, inquiry_id, "check_clarification", "waiting",
+                    f"主诉信息不足（缺: {', '.join(result.get('missing_dimensions', [])) or '未知'}），"
+                    f"生成 {len(questions)} 个追问",
+                )
+                logger.info(f"主诉信息不足，触发追问澄清，问诊记录 {inquiry_id}")
+            else:
+                WorkflowEventDAO.log(session, inquiry_id, "check_clarification", "done", "主诉信息充分")
+        except Exception as exc:
+            logger.warning(f"充分性检查失败（降级为直接分析）: {exc}")
+            state["clarify_questions"] = []
+            try:
+                WorkflowEventDAO.log(
+                    session, inquiry_id, "check_clarification", "failed",
+                    f"充分性检查异常，降级直接分析: {str(exc)[:200]}",
+                )
+            except Exception:
+                pass
+        finally:
+            session.close()
+        return state
+
+    def _should_wait_for_clarification(self, state: MedicalWorkflowState) -> str:
+        if state.get("current_status") == "failed" or state.get("error_message"):
+            return "error"
+        if state.get("clarify_questions"):
+            return "wait"
+        return "continue"
+
+    def _wait_for_clarification(self, state: MedicalWorkflowState) -> MedicalWorkflowState:
+        """在检查点暂停，等医生补答回传后 Command(resume=...) 恢复（与等化验同构）。"""
+        logger.info(f"等待补充问诊信息，问诊记录 {state.get('inquiry_record_id')}")
+        answers = interrupt({
+            "type": "wait_for_clarification",
+            "inquiry_record_id": state.get("inquiry_record_id"),
+            "questions": state.get("clarify_questions", []),
+        })
+        # 补答合并进症状描述：结构化追加，让下游症状分析/检索都能利用补充信息
+        state["clarify_rounds"] = state.get("clarify_rounds", 0) + 1
+        state["clarify_questions"] = []
+        supplement = "\n".join(
+            f"- 问：{a.get('question', '')}\n  答：{a.get('answer', '')}"
+            for a in (answers or [])
+            if str(a.get("answer", "")).strip()
+        )
+        if supplement:
+            state["symptom_description"] = (
+                f"{state.get('symptom_description', '')}\n【医生补充问诊】\n{supplement}"
+            )
+        session = SessionLocal()
+        try:
+            InquiryRecordDAO.update_status(
+                session, state["inquiry_record_id"], InquiryStatus.SYMPTOM_ANALYSIS
+            )
+            # 合并后的主诉回写落库：检查点 state 只有下游 Agent 可见，
+            # 医生端「主诉」展示与历史审计读的是 inquiry_record 行
+            if supplement:
+                session.query(InquiryRecord).filter(
+                    InquiryRecord.id == state["inquiry_record_id"]
+                ).update({"symptom_description": state["symptom_description"]})
+                session.commit()
+            WorkflowEventDAO.log(
+                session, state["inquiry_record_id"], "clarification", "done",
+                f"收到补充回答 {len(answers or [])} 条，已合并进症状描述",
+            )
         finally:
             session.close()
         return state
@@ -499,6 +608,8 @@ class MedicalWorkflow:
             "allergy_history": allergy_history,
             "symptom_description": symptom_description,
             "use_rag": use_rag,
+            "clarify_questions": [],
+            "clarify_rounds": 0,
             "lab_tests_needed": [],
             "lab_results": [],
             "hypotheses": [],
@@ -566,6 +677,32 @@ class MedicalWorkflow:
         finally:
             self._llm_slots.release()
 
+    def handle_clarification(self, inquiry_record_id: int, answers: list[dict]):
+        """补充问答回传：恢复 wait_for_clarification 中断的工作流（照化验回填模式）。"""
+        session = SessionLocal()
+        try:
+            record = InquiryRecordDAO.get(session, inquiry_record_id)
+            thread_id = record.thread_id if record else ""
+        finally:
+            session.close()
+
+        if not thread_id:
+            raise ValueError(
+                f"问诊记录 {inquiry_record_id} 无工作流线程（可能未暂停等待补充信息或已恢复过）"
+            )
+        config = {"configurable": {"thread_id": thread_id}}
+        if not self._llm_slots.acquire(timeout=settings.workflow_queue_timeout_seconds):
+            raise ValueError(
+                f"工作流恢复排队超时（>{settings.workflow_queue_timeout_seconds}s），请稍后重试"
+            )
+        try:
+            with self._run_lock:
+                result = self.graph.invoke(Command(resume=answers), config=config)
+            logger.info(f"补充问诊已回填，工作流已恢复，问诊记录 {inquiry_record_id}")
+            return result
+        finally:
+            self._llm_slots.release()
+
     def get_status_token(self, inquiry_record_id: int) -> str | None:
         """轻量变更令牌：主状态码 + 最新事件 ID（一条索引聚合查询）。
 
@@ -597,7 +734,10 @@ class MedicalWorkflow:
 
             paused = False
             lab_tests_needed = []
-            if record.thread_id and record.main_status == InquiryStatus.WAITING_LAB.value:
+            clarify_questions = []
+            if record.thread_id and record.main_status in (
+                InquiryStatus.WAITING_LAB.value, InquiryStatus.WAITING_CLARIFICATION.value
+            ):
                 try:
                     snapshot = self.graph.get_state({"configurable": {"thread_id": record.thread_id}})
                     paused = bool(snapshot and snapshot.next)
@@ -605,15 +745,25 @@ class MedicalWorkflow:
                         lab_tests_needed = safe_json_loads(symptom.agent_result, {}).get(
                             "lab_tests_needed", []
                         )
+                    if record.main_status == InquiryStatus.WAITING_CLARIFICATION.value:
+                        clarify_questions = (snapshot.values if snapshot else {}).get(
+                            "clarify_questions", []
+                        ) or []
                 except Exception:
-                    paused = record.main_status == InquiryStatus.WAITING_LAB.value
+                    paused = record.main_status in (
+                        InquiryStatus.WAITING_LAB.value, InquiryStatus.WAITING_CLARIFICATION.value
+                    )
 
             return {
                 "success": True,
                 "inquiry_record_id": inquiry_record_id,
                 "main_status": record.main_status,
                 "status_label": STATUS_LABELS.get(record.main_status, str(record.main_status)),
-                "waiting_lab": paused,
+                "waiting_lab": paused and record.main_status == InquiryStatus.WAITING_LAB.value,
+                "waiting_clarification": (
+                    paused and record.main_status == InquiryStatus.WAITING_CLARIFICATION.value
+                ),
+                "clarify_questions": clarify_questions,
                 "lab_tests_needed": lab_tests_needed,
                 "patient": {
                     "name": record.patient_name,

@@ -3,6 +3,7 @@ import {
   apiStartWorkflow,
   apiWorkflowStatus,
   apiSubmitLabResults,
+  apiSubmitClarification,
   apiListHistory,
 } from '../api.js'
 import Citations from '../components/Citations.jsx'
@@ -17,8 +18,10 @@ const STEPS = [
 ]
 
 function stepIndex(status) {
-  // main_status: 0创建 1症状 2待化验 3诊断 4治疗 5完成 99失败
+  // main_status: 0创建 1症状 2待化验 3诊断 4治疗 5完成 6待补充信息 99失败
+  // 6（等待补充问诊）仍处于症状分析前的补全阶段，映射到「创建问诊」之后、症状分析待启动
   if (status === 99) return 5
+  if (status === 6) return 1
   return status
 }
 
@@ -47,6 +50,10 @@ export default function Workspace() {
   // 化验回填
   const [labRows, setLabRows] = useState([{ test_name: '', result_value: '', unit: '', reference_range: '', is_abnormal: false }])
   const [submittingLab, setSubmittingLab] = useState(false)
+
+  // 追问澄清回填（主诉模糊时系统暂停等待补答）
+  const [clarifyAnswers, setClarifyAnswers] = useState({})
+  const [submittingClarify, setSubmittingClarify] = useState(false)
 
   const stopPolling = () => {
     if (pollTimerRef.current) {
@@ -171,8 +178,31 @@ export default function Workspace() {
     }
   }
 
+  const submitClarify = async () => {
+    setSubmittingClarify(true)
+    setError('')
+    try {
+      const questions = status?.clarify_questions || []
+      const answers = questions
+        .map((q) => ({ question: q.question, answer: (clarifyAnswers[q.question] || '').trim() }))
+        .filter((a) => a.answer)
+      if (!answers.length) {
+        setError('请至少回答一个追问问题')
+        return
+      }
+      await apiSubmitClarification(currentId, answers)
+      setClarifyAnswers({})
+      watchStatus(currentId)
+    } catch (err) {
+      setError(typeof err?.message === 'string' ? err.message : JSON.stringify(err))
+    } finally {
+      setSubmittingClarify(false)
+    }
+  }
+
   const idx = status ? stepIndex(status.main_status) : -1
   const waitingLab = status?.main_status === 2
+  const waitingClarify = status?.main_status === 6
 
   return (
     <div className="workspace">
@@ -289,12 +319,43 @@ export default function Workspace() {
               </div>
 
               <div className="muted">主诉：{status.patient.symptom_description}</div>
+              {waitingClarify && (
+                <div className="mt8" style={{ color: 'var(--warning)' }}>
+                  ⚠️ 主诉描述信息不足，系统已生成追问，请补充回答后继续
+                </div>
+              )}
               {status.patient.allergy_history?.length > 0 && (
                 <div className="mt8" style={{ color: 'var(--danger)' }}>
                   ⚠️ 过敏史：{status.patient.allergy_history.join('、')}
                 </div>
               )}
             </div>
+
+            {waitingClarify && (
+              <div className="card clarify-card">
+                <h3>💬 补充问诊 <span className="badge">提交后工作流自动恢复</span></h3>
+                <div className="hint mb12">
+                  系统判断当前主诉缺少关键信息（部位 / 持续时间 / 性质程度 / 诱因缓解 / 伴随症状），
+                  请补充回答以下追问，回答将合并进症状描述再进行分析。
+                </div>
+                {(status.clarify_questions || []).map((q, i) => (
+                  <div className="clarify-item" key={i}>
+                    <div className="clarify-q">
+                      <span className="chip">{q.dimension}</span> {q.question}
+                    </div>
+                    <input
+                      value={clarifyAnswers[q.question] || ''}
+                      onChange={(e) => setClarifyAnswers({ ...clarifyAnswers, [q.question]: e.target.value })}
+                      placeholder="请输入患者的补充说明…"
+                    />
+                  </div>
+                ))}
+                {error && <div className="error-text">{error}</div>}
+                <button className="btn" disabled={submittingClarify} onClick={submitClarify}>
+                  {submittingClarify ? '提交中…' : '提交补充信息，恢复工作流'}
+                </button>
+              </div>
+            )}
 
             {waitingLab && (
               <div className="card">

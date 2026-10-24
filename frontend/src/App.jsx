@@ -1,13 +1,28 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import Login from './views/Login.jsx'
 import Workspace from './views/Workspace.jsx'
 import KnowledgePanel from './views/KnowledgePanel.jsx'
 import UsersPanel from './views/UsersPanel.jsx'
+import PatientChat from './views/PatientChat.jsx'
 import { currentUser, apiLogout } from './api.js'
 
 export default function App() {
   const [user, setUser] = useState(currentUser())
   const [tab, setTab] = useState('workspace')
+  // 患者端免登录入口：#/chat 直接进入聊天界面（不经过医生登录）。
+  // hash 是响应式的：登录页点「患者快速咨询」改 hash 也要切页面，故监听 hashchange。
+  const [patientMode, setPatientMode] = useState(
+    typeof window !== 'undefined' && window.location.hash === '#/chat'
+  )
+  useEffect(() => {
+    const onHashChange = () => setPatientMode(window.location.hash === '#/chat')
+    window.addEventListener('hashchange', onHashChange)
+    return () => window.removeEventListener('hashchange', onHashChange)
+  }, [])
+
+  if (patientMode) {
+    return <PatientChat />
+  }
 
   if (!user) {
     return <Login onLogin={setUser} />

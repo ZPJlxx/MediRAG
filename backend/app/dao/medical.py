@@ -8,6 +8,8 @@ from app.models.entities import (
     AgentSessionHis,
     DiseaseDiagnosisResult,
     InquiryRecord,
+    PatientChatMessage,
+    PatientChatSession,
     SymptomAnalysisResult,
     TreatmentSuggestionResult,
     WorkflowEvent,
@@ -200,6 +202,61 @@ class WorkflowEventDAO:
             .first()
         )
         return row[0] if row else 0
+
+
+class PatientChatDAO:
+    """患者端聊天会话/消息持久化（照 WorkflowEventDAO 静态方法风格）。"""
+
+    @staticmethod
+    def get_or_create_session(session: Session, session_key: str, client_ip: str = "") -> PatientChatSession:
+        record = (
+            session.query(PatientChatSession)
+            .filter(PatientChatSession.session_key == session_key)
+            .first()
+        )
+        if record:
+            return record
+        record = PatientChatSession(session_key=session_key, client_ip=client_ip[:50])
+        session.add(record)
+        session.commit()
+        session.refresh(record)
+        return record
+
+    @staticmethod
+    def add_message(
+        session: Session,
+        session_id: int,
+        role: str,
+        content: str,
+        intent: str = "",
+        citations_json: str = "[]",
+    ) -> PatientChatMessage:
+        message = PatientChatMessage(
+            session_id=session_id,
+            role=role,
+            content=content,
+            intent=intent[:20],
+            citations=citations_json,
+        )
+        session.add(message)
+        session.query(PatientChatSession).filter(
+            PatientChatSession.id == session_id
+        ).update({"message_count": PatientChatSession.message_count + 1})
+        session.commit()
+        session.refresh(message)
+        return message
+
+    @staticmethod
+    def list_messages(session: Session, session_id: int, limit: int = 20) -> list[PatientChatMessage]:
+        """最近消息（时间正序返回，供 LLM 做多轮上下文）。"""
+        rows = (
+            session.query(PatientChatMessage)
+            .filter(PatientChatMessage.session_id == session_id)
+            .order_by(PatientChatMessage.id.desc())
+            .limit(limit)
+            .all()
+        )
+        return list(reversed(rows))
 
 
 def safe_json_loads(text: str, default=None):

@@ -14,6 +14,7 @@ from app.dao.medical import InquiryRecordDAO
 from app.medical.workflow import medical_workflow
 from app.models.entities import SysUser
 from app.schemas.auth import LabResultRequest, StartWorkflowRequest
+from app.schemas.medical import ClarifyRequest
 
 router = APIRouter(prefix="/api/workflow", tags=["workflow"])
 
@@ -93,6 +94,31 @@ async def submit_lab_results(
     return {"success": True, "message": "化验结果已提交，工作流已恢复", "status": status}
 
 
+@router.post("/{inquiry_id}/clarify")
+async def submit_clarification(
+    inquiry_id: int,
+    request: ClarifyRequest,
+    user: SysUser = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """补充问答回填：主诉模糊触发追问后，医生补答回复暂停的工作流。"""
+    _ensure_owned_record(inquiry_id, user, db)
+    answers = [{"question": a.question, "answer": a.answer.strip()} for a in request.answers]
+    if not any(a["answer"] for a in answers):
+        raise HTTPException(status_code=400, detail="至少需要填写一条补充回答")
+
+    def _resume():
+        medical_workflow.handle_clarification(inquiry_id, answers)
+
+    try:
+        await asyncio.to_thread(_resume)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    status = await asyncio.to_thread(medical_workflow.get_status, inquiry_id)
+    return {"success": True, "message": "补充信息已提交，工作流已恢复", "status": status}
+
+
 @router.get("/list/history")
 async def list_history(
     user: SysUser = Depends(get_current_user),
@@ -138,6 +164,8 @@ def _status_fingerprint(status: dict) -> str:
         {
             "ms": status.get("main_status"),
             "wl": status.get("waiting_lab"),
+            "wc": status.get("waiting_clarification"),
+            "cq": len(status.get("clarify_questions") or []),
             "lt": status.get("lab_tests_needed"),
             "sym": bool(status.get("symptom_analysis")),
             "hyp": len(status.get("hypothesis_verifications") or []),

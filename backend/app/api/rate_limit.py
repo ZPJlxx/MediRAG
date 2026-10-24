@@ -55,3 +55,9 @@ def workflow_rate_limit(request: Request) -> None:
     """工作流启动限流：每 IP 每分钟 5 次（单次问诊要烧多轮 LLM 配额）。"""
     if not _limiter.allow("workflow", _client_ip(request), limit=5, window_seconds=60):
         raise HTTPException(status_code=429, detail="诊疗工作流提交过于频繁，请稍后再试")
+
+
+def chat_rate_limit(request: Request) -> None:
+    """患者聊天限流：每 IP 每分钟 20 次（免登录接口，防配额烧穿的唯一闸门）。"""
+    if not _limiter.allow("patient_chat", _client_ip(request), limit=20, window_seconds=60):
+        raise HTTPException(status_code=429, detail="发送过于频繁，请稍后再试")

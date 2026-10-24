@@ -49,6 +49,8 @@ export default function Login({ onLogin }) {
         <div className="demo">
           演示账号：admin / admin123（管理员）· doctor / doctor123（医生）
         </div>
+
+        <a className="patient-entry" href="#/chat">👤 患者快速咨询 →（免登录）</a>
       </form>
     </div>
   )

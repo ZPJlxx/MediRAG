@@ -27,6 +27,7 @@ class InquiryStatus(int, Enum):
     DIAGNOSIS_ANALYSIS = 3
     TREATMENT_ADVICE = 4
     COMPLETED = 5
+    WAITING_CLARIFICATION = 6
     FAILED = 99
 
 
@@ -43,6 +44,7 @@ STAGE_LABELS = {
     InquiryStatus.DIAGNOSIS_ANALYSIS: "诊断分析",
     InquiryStatus.TREATMENT_ADVICE: "治疗建议",
     InquiryStatus.COMPLETED: "已完成",
+    InquiryStatus.WAITING_CLARIFICATION: "等待补充信息",
     InquiryStatus.FAILED: "失败",
 }
 
@@ -126,3 +128,16 @@ class LabResultItem(BaseModel):
     unit: str = Field(default="", description="单位")
     reference_range: str = Field(default="", description="参考范围")
     is_abnormal: bool = Field(default=False, description="是否异常")
+
+
+class ClarifyAnswerItem(BaseModel):
+    """单条追问的回答（医生补充问诊信息）。"""
+
+    question: str = Field(..., description="系统追问的问题")
+    answer: str = Field(..., min_length=1, description="医生补充的回答")
+
+
+class ClarifyRequest(BaseModel):
+    """澄清回填请求：恢复 wait_for_clarification 中断的工作流。"""
+
+    answers: list[ClarifyAnswerItem] = Field(..., min_length=1, description="逐条回答")

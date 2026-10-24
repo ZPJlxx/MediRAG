@@ -76,6 +76,14 @@ class Settings(BaseSettings):
     rabbitmq_username: str = "guest"
     rabbitmq_password: str = "guest"
 
+    # ---- 向量库后端 ----
+    # sqlite: 自实现 SQLite+numpy 余弦（零依赖默认值）；qdrant: Qdrant（local 嵌入式/服务端）；
+    # milvus: 预留插槽（接口已抽象，见 app/rag/vector_store.py 的 VectorStoreBase）
+    vector_backend: str = "sqlite"
+    # Qdrant 服务端地址（生产 Docker 部署时填写，如 http://localhost:6333）；
+    # 留空则用 local 嵌入式模式（数据落在 vector_store_dir/<指纹>/qdrant_local/）
+    qdrant_url: str = ""
+
     # ---- 派生路径 ----
     @property
     def project_root(self) -> Path:

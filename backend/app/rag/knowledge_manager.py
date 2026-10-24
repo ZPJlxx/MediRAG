@@ -30,7 +30,7 @@ from app.rag.model_clients import (
     get_rerank_client,
 )
 from app.rag.retriever import KeywordPriorityRetriever, build_bm25_retriever
-from app.rag.vector_store import SqliteVectorStore, rebuild_if_changed
+from app.rag.vector_store import create_vector_store, drop_collection_storage, rebuild_if_changed
 from app.schemas.medical import Citation
 
 
@@ -70,11 +70,11 @@ def create_indexes(
     embedding_fingerprint_value: str,
     reranker=None,
 ) -> KeywordPriorityRetriever:
-    """单文件建索引：SqliteVectorStore + BM25 -> 混合检索器。
+    """单文件建索引：向量库（可切后端）+ BM25 -> 混合检索器。
 
     文件指纹（路径+mtime+大小）变化时全量重建，否则增量补录。
     """
-    store = SqliteVectorStore(
+    store = create_vector_store(
         collection_name=collection_name,
         db_path=settings.vector_store_dir / embedding_fingerprint_value / f"{collection_name}.sqlite",
         embedding_function=embedding_function,
@@ -221,12 +221,9 @@ class KnowledgeManager:
         with self._retriever_lock:
             self._retrievers.pop(collection_name, None)
 
-        # 清理所有 embedding 指纹目录下该 collection 的向量库文件
-        if settings.vector_store_dir.exists():
-            for fingerprint_dir in settings.vector_store_dir.iterdir():
-                target = fingerprint_dir / f"{collection_name}.sqlite"
-                if target.exists():
-                    target.unlink()
+        # 清理所有 embedding 指纹目录下该 collection 的向量存储（按后端分发：
+        # sqlite 删库文件 / qdrant 删 collection）
+        drop_collection_storage(collection_name)
 
         logger.info(f"知识文件已删除: {rel_path}")
         return True

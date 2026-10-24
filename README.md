@@ -1,6 +1,7 @@
-# MediRAG 智慧医疗辅助诊疗平台
+# MediRAG 智慧医疗诊疗平台
 
 > RAG 增强的多 Agent 医疗辅助诊疗系统：症状分析 → 化验中断 → 诊断推理 → 治疗建议，**每条建议都能给出知识库出处**。
+> 医生端（登录）：模糊主诉自动追问澄清；患者端（免登录 `#/chat`）：意图识别聊天——闲聊 / 健康咨询 / 症状问诊 / 急症警示四路分流。
 
 ## 项目简介
 
@@ -16,29 +17,53 @@ MediRAG 是三个项目整合二次创新的成果：
 1. **证据可溯源的医疗 AI**——诊断/治疗建议强制携带 `citations`（来源文件 + 位置 + 原文片段），LLM 只能引用检索提供的编号，无法编造出处
 2. **RAG 注入多 Agent 工作流**——症状/诊断/治疗三个 Agent 各自构造检索查询（症状描述→疾病名+症状→主诊断+鉴别诊断），参考资料块注入 Prompt
 3. **鉴别假设并行核验（Send fan-out / map-reduce）**——诊断前对 Top-3 鉴别假设各派生一个独立核验 Agent **并行执行**（同一超步分发，`Annotated[list, operator.add]` reducer 聚合），对照患者症状、化验结果与知识库分别打支持度分，榜单注入诊断 Agent 综合裁决——即医疗领域的 second opinion（第二意见）机制；主流程保持固定 DAG 以确保可审计（每次核验调用均落 `agent_session_his`）
-4. **检查点持久化的人机协同**——SqliteSaver 替代内存检查点，化验结果回填可跨进程恢复工作流
-5. **修复并增强了三个源项目的已知缺陷**（详见下文"修复清单"）
+4. **检查点持久化的人机协同（两个 interrupt 实例）**——SqliteSaver 替代内存检查点，化验结果回填可跨进程恢复工作流；同一机制复用于「主诉追问澄清」：症状描述模糊（如"喉咙不舒服"）时，充分性检查 Agent 按五维度（部位/持续时间/性质程度/诱因缓解/伴随症状）判定信息缺口并生成 3~5 个追问，工作流 `interrupt()` 暂停等待医生补答，`Command(resume=...)` 恢复后补充问答合并进症状描述再分析（限 1 轮，防无限追问）
+5. **患者端意图识别聊天**——免登录 `#/chat` 入口的"智慧医疗诊疗聊天"：规则快路径（急症红旗词零延迟短路 + 纯问候直达）+ LLM 结构化分类（低温/固定枚举/JSON Schema）+ 失败兜底 consult 的三级意图识别范式，四路分流（闲聊轻量回应/健康咨询 RAG 答疑/症状问诊科普+就医引导严禁诊断/急症固定警示文案不经 LLM），复用与医生端同一套引用防编造链路，会话与消息（含意图标签）全量落库审计
+6. **修复并增强了三个源项目的已知缺陷**（详见下文"修复清单"）
 
 ## 架构
 
 ```
 React 医疗工作台 (5173)
  ├─ 登录(JWT) / 诊疗工作台 / 知识库管理 / 用户管理(admin)
- └─ 证据引用卡片 · 状态机步骤条 · 化验回填表单 · 流程时间线
+ ├─ 证据引用卡片 · 状态机步骤条 · 化验回填表单 · 追问澄清卡片 · 流程时间线
+ ├─ 患者端聊天页(#/chat 免登录)：意图徽章 · 引用卡片 · 急症红色警示
         │ /api/*（代理到 8000）
 FastAPI 单服务 (8000)
- ├─ auth/knowledge/users/workflow 四组路由
+ ├─ auth/knowledge/users/workflow/patient 五组路由
  ├─ LangGraph 诊疗工作流（SqliteSaver 检查点持久化）
- │    create_inquiry → symptom_analysis → [interrupt 等化验]
- │      → prepare_hypotheses ──Send×N──► verify_hypothesis（并行超步，reducer 聚合）
+ │    create_inquiry → check_clarification ─[interrupt 等医生补答]→ symptom_analysis
+ │      → [interrupt 等化验] → prepare_hypotheses ──Send×N──► verify_hypothesis（并行超步，reducer 聚合）
  │      → merge_verifications（支持度榜单）→ diagnosis → treatment → complete
  │    每个 Agent：审计 → RAG检索 → 参考资料注入 → LLM → Pydantic校验 → 引用映射 → 落库
+ ├─ 患者聊天编排（app/medical/patient_chat.py）
+ │    意图识别(intent.py: 规则短路+LLM分类+兜底) → 四路分流 → RAG答疑(引用防编造) → 落库
  ├─ RAG 引擎（app/rag/）
  │    loader(中文感知切分+位置标签) / SqliteVectorStore(SQLite+numpy余弦)
  │    KeywordPriorityRetriever(向量+BM25[jieba]+关键词打分, RRF融合) / DashScope gte-rerank-v2
  │    evidence(Citation 构造 / 编号映射防编造)
- └─ 存储：SQLite(dev)/MySQL(prod) + 向量库(SQLite文件) + 工作流检查点(SQLite)
+ └─ 存储：SQLite(dev)/MySQL(prod) + 向量库(可切后端) + 工作流检查点(SQLite)
 LLM 网关：OpenAI 兼容协议（DashScope qwen-plus 默认，可切 DeepSeek/任意兼容端点）
+```
+
+### 向量库后端（可切换）
+
+`VECTOR_BACKEND` 环境变量切换，接口契约抽象在 `VectorStoreBase`（app/rag/vector_store.py），上层检索代码零改动：
+
+| 后端 | 形态 | 适用 |
+|---|---|---|
+| `sqlite`（默认） | 自实现 SQLite + numpy 余弦，零额外依赖 | 兜底 / 最小部署 |
+| `qdrant` | local 嵌入式（纯 Python，Windows 可用）；`QDRANT_URL` 填地址即切 Docker 服务端（compose 已带） | 当前 3.7 万 chunk 规模推荐；生产平滑升级 |
+| `milvus` | 插槽已预留：实现 `MilvusVectorStore(VectorStoreBase)` 并在工厂注册即可 | 百万级以上 |
+
+历史 sqlite 向量可零成本搬运（向量直迁不重调 embedding API）：
+
+```bash
+cd backend
+python scripts/migrate_vector_to_qdrant.py --dry-run   # 演习：统计将迁移的 collection/向量数
+python scripts/migrate_vector_to_qdrant.py             # 执行迁移（幂等可重跑，逐库 count 校验）
+# 服务端模式：docker compose up -d qdrant && QDRANT_URL=http://localhost:6333 python scripts/migrate_vector_to_qdrant.py
+# 切换：.env 中 VECTOR_BACKEND=qdrant（回退改回 sqlite 即可，原库文件保留）
 ```
 
 ## 快速开始（开发模式，零外部服务依赖）
@@ -71,12 +96,19 @@ npm run dev                       # http://localhost:5173
 
 ## 使用流程
 
+**患者端（免登录）**：
+1. 打开 `http://localhost:5173/#/chat`（或登录页点"患者快速咨询"）
+2. 直接对话：闲聊寒暄 / 健康知识咨询（"二甲双胍是什么药"）/ 症状问诊（"最近老头晕"）
+3. 系统实时显示意图徽章；问诊类回复含就医引导（推荐科室 + 红旗症状）与知识库引用；急症词（胸痛/呼吸困难/昏迷等）触发红色警示卡（不经 LLM，固定文案）
+
+**医生端（登录）**：
 1. `doctor/doctor123` 登录 → 诊疗工作台
 2. 录入患者信息 + 症状描述（可选填过敏史）→ 启动工作流
-3. 症状分析完成；若需化验，工作流**暂停**在"等待化验"步骤
-4. 化验结果回填（表格输入）→ 工作流自动恢复 → 诊断 → 治疗
-5. 每个阶段结果下方展示**证据引用卡片**（来源文档 + 位置 + 原文片段）
-6. 知识库页可上传临床指南/药品说明书（pdf/docx/txt/md/csv），或用检索测试验证效果
+3. 主诉模糊时（如"喉咙不舒服"）工作流**暂停在"等待补充信息"**：系统按五维度生成追问，医生逐条补答后提交，回答合并进症状描述继续分析
+4. 症状分析完成；若需化验，工作流**暂停**在"等待化验"步骤
+5. 化验结果回填（表格输入）→ 工作流自动恢复 → 诊断 → 治疗
+6. 每个阶段结果下方展示**证据引用卡片**（来源文档 + 位置 + 原文片段）
+7. 知识库页可上传临床指南/药品说明书（pdf/docx/txt/md/csv），或用检索测试验证效果
 
 ## 知识库数据集
 
@@ -179,6 +211,6 @@ curl -X POST http://127.0.0.1:8000/api/v1/algorithm/diagnosis/tasks/<task_id>/la
 
 ## 已知限制与说明
 
-- **向量库**：chromadb 的原生 wheel（chroma-hnswlib / rust frontend）在部分 Windows + Python 3.12 环境下 `add_items` 段错误（faulthandler 定位于原生层），本项目改用自实现 `SqliteVectorStore`（SQLite 存储 + numpy 暴力余弦检索）。医学知识库规模（万级 chunk 内）延迟毫秒级，零原生依赖。若在 Linux/其他环境可自行换回 Chroma（接口面已隔离在 `create_indexes`）。
+- **向量库**：接口抽象为 `VectorStoreBase`（sqlite / qdrant 双实现，milvus 插槽预留），`VECTOR_BACKEND` 一键切换。早期 chromadb 在部分 Windows + Python 3.12 环境下 `add_items` 段错误的坑已绕开：sqlite 后端零原生依赖，qdrant local 模式纯 Python（Windows 实测可用，3.8 万向量检索热路径 0.6~1.4s 含 rerank 往返）。
 - 患者身份以"姓名"近似关联历史（演示用途），生产应换真实患者主键。
 - **合规**：仅供演示与辅助参考，不能替代执业医师的诊断与治疗决策。

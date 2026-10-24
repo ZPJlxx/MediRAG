@@ -31,9 +31,11 @@ langgraph==1.0.2
 langgraph-checkpoint-sqlite>=2.0.1
 
 # 向量库与检索
-# 说明：chromadb 的原生 wheel（chroma-hnswlib/rust frontend）在部分 Windows + Py3.12
-# 环境下 add_items 段错误，本项目改用自实现 SqliteVectorStore（SQLite + numpy 余弦），
-# 见 app/rag/vector_store.py，零原生依赖、同等持久化。
+# 后端可切换（VECTOR_BACKEND=sqlite|qdrant，接口抽象见 app/rag/vector_store.py，预留 milvus 插槽）：
+# - sqlite: 自实现 SQLite + numpy 余弦（零额外依赖默认值）
+# - qdrant: 成熟开源向量库，local 嵌入式模式（纯 Python，Windows 可用）；
+#   生产填 QDRANT_URL 切 Docker 服务端（docker-compose 已带 qdrant 服务）
+qdrant-client>=1.12
 numpy>=1.26
 rank-bm25==0.2.2
 jieba>=0.42
